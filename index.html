@@ -18,22 +18,30 @@
           <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light mode" aria-pressed="false">☼ Light</button>
           <button class="icon-button" id="refresh-all" aria-label="Refresh all charts" title="Refresh all charts">↻</button>
           <button class="icon-button orders-icon" id="open-orders" type="button" aria-label="Open active orders" title="Active orders">▤</button>
+          <button class="button button-secondary latest-news-button" id="open-news" type="button" aria-label="Open latest market news">Latest News</button>
           <button class="icon-button settings-gear" id="open-settings" type="button" aria-label="Open trading settings" title="Trading settings">⚙</button>
         </div>
         <div class="topbar-actions" id="settings-actions" hidden><button class="button button-secondary" id="back-to-workspace" type="button">← Back to charts</button></div>
       </header>
 
       <div id="workspace-view">
-      <section class="market-overview" id="top" aria-label="NIFTY spot overview">
+      <section class="market-overview" id="top" aria-label="Index spot overview">
         <div class="overview-main">
-          <div class="eyebrow"><span class="market-dot"></span> NSE · NIFTY 50 SPOT</div>
+          <div class="eyebrow"><span class="market-dot"></span> <span id="spot-eyebrow">NSE · NIFTY 50 SPOT</span></div>
           <div class="spot-row"><h1 id="spot-price">—</h1><span id="spot-change" class="spot-change">Waiting for quote</span></div>
           <p class="market-caption" id="market-caption">Connect your FYERS data app to load the session’s market data.</p>
         </div>
         <div class="overview-controls">
+          <label for="underlying-select">INDEX</label>
+          <select id="underlying-select" aria-label="Choose index"><option value="NIFTY">NIFTY</option><option value="BANKNIFTY">BANK NIFTY</option></select>
           <label for="expiry-select">OPTION EXPIRY</label>
           <select id="expiry-select" disabled aria-label="Option expiry"><option>Connect to load</option></select>
           <span class="nearest-note">CE and PE use the available strikes nearest to spot.</span>
+          <section class="workspace-panel" aria-label="Saved chart workspaces">
+            <label for="workspace-name">WORKSPACES</label>
+            <div class="workspace-save-row"><input id="workspace-name" type="text" maxlength="48" placeholder="Workspace name" aria-label="Workspace name"><button class="button button-secondary" id="save-workspace" type="button">Save</button></div>
+            <div class="workspace-load-row"><select id="workspace-select" aria-label="Saved workspaces"><option value="">No saved workspaces</option></select><button class="button button-secondary" id="load-workspace" type="button" disabled>Load</button><button class="button button-secondary" id="delete-workspace" type="button" disabled aria-label="Delete selected workspace">Delete</button></div>
+          </section>
         </div>
       </section>
 
@@ -44,71 +52,71 @@
       </div>
 
       <section class="chart-stack" aria-label="NIFTY charts">
+        <article class="chart-card" data-chart-card="spot-intraday">
+          <header class="chart-card-header">
+            <div class="chart-heading">
+              <div class="chart-title-row"><span class="chart-index spot-index">01</span><h2 class="spot-title">NIFTY 50 Spot</h2><span class="contract-pill spot-pill">INDEX</span></div>
+              <p class="spot-subtitle">Spot price · historical OHLC</p>
+            </div>
+            <label class="interval-control"><span>INTERVAL</span><select id="interval-spot-intraday" data-series="spot-intraday" aria-label="Spot chart interval"><option value="1">1m</option><option value="5">5m</option><option value="15">15m</option><option value="30">30m</option><option value="60" selected>1h</option><option value="1D">1D</option></select></label>
+          </header>
+          <div class="indicator-legend" aria-label="Exponential moving averages">
+            <span class="ema-legend-item" data-ema-legend="spot-intraday-0"><i class="ema-swatch"></i><span class="ema-legend-name">EMA 50</span> <b id="ema-spot-intraday-0">—</b></span><span class="ema-legend-item" data-ema-legend="spot-intraday-1"><i class="ema-swatch"></i><span class="ema-legend-name">EMA 100</span> <b id="ema-spot-intraday-1">—</b></span><span class="ema-legend-item" data-ema-legend="spot-intraday-2"><i class="ema-swatch"></i><span class="ema-legend-name">EMA 200</span> <b id="ema-spot-intraday-2">—</b></span>
+            <div class="chart-markup-tools"><button type="button" class="chart-tool-button indicator-settings-button" data-indicator-settings="spot-intraday" aria-label="Open spot-intraday chart indicator settings" title="Indicator settings" aria-haspopup="dialog" aria-expanded="false">⚙</button><button type="button" class="chart-tool-button" data-trendline-toggle="spot-intraday" aria-label="Draw a trend line on the intraday spot chart">↗ Line</button><button type="button" class="chart-tool-button trendline-extend-toggle is-active" data-trendline-extend="spot-intraday" aria-label="Toggle extend trend lines right" aria-pressed="true">→ Right</button><button type="button" class="chart-tool-button" data-trendline-clear="spot-intraday" aria-label="Remove intraday spot chart trend lines" disabled>Clear</button></div>
+            <div class="chart-zoom" role="group" aria-label="Intraday spot chart zoom"><button type="button" data-chart-zoom="spot-intraday" data-action="out" aria-label="Zoom out intraday spot chart">−</button><button type="button" data-chart-zoom="spot-intraday" data-action="in" aria-label="Zoom in intraday spot chart">+</button><button type="button" data-chart-zoom="spot-intraday" data-action="reset" aria-label="Reset intraday spot chart view">Reset</button></div>
+          </div>
+          <div class="chart-body"><svg class="candlestick-chart" id="chart-spot-intraday" viewBox="0 0 760 180" preserveAspectRatio="none" role="img" aria-label="NIFTY spot five minute chart"><title>Drag the chart to pan. Drag the right price scale vertically to expand or compress prices. Use zoom buttons or mouse wheel to zoom.</title><g></g></svg><div class="time-axis" id="time-axis-spot-intraday" aria-label="Intraday spot chart date axis" hidden></div><div class="chart-empty" id="empty-spot-intraday"><span class="loading-mark">⌁</span><span>Waiting for market data</span></div><button class="chart-latest-button" type="button" data-chart-latest="spot-intraday" aria-label="Jump to latest candles for NIFTY spot intraday" title="Go to latest candles" hidden>→</button></div>
+          <footer class="chart-card-footer"><span id="status-spot-intraday">No candles loaded</span><span id="last-spot-intraday">—</span></footer>
+        </article>
+
         <article class="chart-card" data-chart-card="call">
           <header class="chart-card-header">
             <div class="chart-heading">
-              <div class="chart-title-row"><span class="chart-index call-index">01</span><h2 id="call-title">Nearest NIFTY CE</h2><span class="contract-pill call-pill" id="call-symbol">Waiting for option chain</span></div>
+              <div class="chart-title-row"><span class="chart-index call-index">02</span><h2 id="call-title">Nearest NIFTY CE</h2><span class="contract-pill call-pill" id="call-symbol">Waiting for option chain</span></div>
               <div class="chart-subrow"><p id="call-subtitle">Closest call strike to the current NIFTY spot price</p><div class="contract-nav" role="group" aria-label="Change call option strike"><button type="button" data-contract-nav="call" data-direction="-1" aria-label="Previous call strike" disabled>‹</button><button type="button" data-contract-nav="call" data-direction="1" aria-label="Next call strike" disabled>›</button></div><button class="buy-button" type="button" data-paper-buy="call">Buy</button></div>
             </div>
-            <label class="interval-control"><span>INTERVAL</span><select id="interval-call" data-series="call" aria-label="Call chart interval"><option value="1">1m</option><option value="2">2m</option><option value="3">3m</option><option value="5" selected>5m</option><option value="15">15m</option><option value="30">30m</option><option value="60">1h</option><option value="1D">1D</option></select></label>
+            <label class="interval-control"><span>INTERVAL</span><select id="interval-call" data-series="call" aria-label="Call chart interval"><option value="1">1m</option><option value="5" selected>5m</option><option value="15">15m</option><option value="30">30m</option><option value="60">1h</option><option value="1D">1D</option></select></label>
           </header>
           <div class="indicator-legend" aria-label="Exponential moving averages">
-            <span class="ema-legend-item"><i class="ema-swatch ema-50"></i>EMA 50 <b id="ema-call-50">—</b></span><span class="ema-legend-item"><i class="ema-swatch ema-100"></i>EMA 100 <b id="ema-call-100">—</b></span><span class="ema-legend-item"><i class="ema-swatch ema-200"></i>EMA 200 <b id="ema-call-200">—</b></span>
-            <div class="chart-markup-tools"><button type="button" class="chart-tool-button" data-indicator-toggle="call" aria-label="Turn off call chart EMAs" aria-pressed="true">EMA On</button><button type="button" class="chart-tool-button" data-trendline-toggle="call" aria-label="Draw a trend line on the call chart">↗ Line</button><button type="button" class="chart-tool-button" data-trendline-clear="call" aria-label="Remove call chart trend lines" disabled>Clear</button></div>
+            <span class="ema-legend-item" data-ema-legend="call-0"><i class="ema-swatch"></i><span class="ema-legend-name">EMA 50</span> <b id="ema-call-0">—</b></span><span class="ema-legend-item" data-ema-legend="call-1"><i class="ema-swatch"></i><span class="ema-legend-name">EMA 100</span> <b id="ema-call-1">—</b></span><span class="ema-legend-item" data-ema-legend="call-2"><i class="ema-swatch"></i><span class="ema-legend-name">EMA 200</span> <b id="ema-call-2">—</b></span>
+            <div class="chart-markup-tools"><button type="button" class="chart-tool-button indicator-settings-button" data-indicator-settings="call" aria-label="Open call chart indicator settings" title="Indicator settings" aria-haspopup="dialog" aria-expanded="false">⚙</button><button type="button" class="chart-tool-button" data-trendline-toggle="call" aria-label="Draw a trend line on the call chart">↗ Line</button><button type="button" class="chart-tool-button trendline-extend-toggle is-active" data-trendline-extend="call" aria-label="Toggle extend trend lines right" aria-pressed="true">→ Right</button><button type="button" class="chart-tool-button" data-trendline-clear="call" aria-label="Remove call chart trend lines" disabled>Clear</button></div>
             <div class="chart-zoom" role="group" aria-label="Call chart zoom"><button type="button" data-chart-zoom="call" data-action="out" aria-label="Zoom out call chart">−</button><button type="button" data-chart-zoom="call" data-action="in" aria-label="Zoom in call chart">+</button><button type="button" data-chart-zoom="call" data-action="reset" aria-label="Reset call chart view">Reset</button></div>
           </div>
-          <div class="chart-body"><svg class="candlestick-chart" id="chart-call" viewBox="0 0 760 180" preserveAspectRatio="none" role="img" aria-label="Nearest NIFTY call option chart"><title>Drag the chart to pan. Drag the right price scale vertically to expand or compress prices. Use zoom buttons or mouse wheel to zoom.</title><g></g></svg><div class="time-axis" id="time-axis-call" aria-label="Call chart date axis" hidden></div><div class="chart-empty" id="empty-call"><span class="loading-mark">⌁</span><span>Waiting for market data</span></div></div>
+          <div class="chart-body"><svg class="candlestick-chart" id="chart-call" viewBox="0 0 760 180" preserveAspectRatio="none" role="img" aria-label="Nearest NIFTY call option chart"><title>Drag the chart to pan. Drag the right price scale vertically to expand or compress prices. Use zoom buttons or mouse wheel to zoom.</title><g></g></svg><div class="time-axis" id="time-axis-call" aria-label="Call chart date axis" hidden></div><div class="chart-empty" id="empty-call"><span class="loading-mark">⌁</span><span>Waiting for market data</span></div><button class="chart-latest-button" type="button" data-chart-latest="call" aria-label="Jump to latest candles for NIFTY CE" title="Go to latest candles" hidden>→</button></div>
           <footer class="chart-card-footer"><span id="status-call">No candles loaded</span><span id="last-call">—</span></footer>
         </article>
 
         <article class="chart-card" data-chart-card="put">
           <header class="chart-card-header">
             <div class="chart-heading">
-              <div class="chart-title-row"><span class="chart-index put-index">02</span><h2 id="put-title">Nearest NIFTY PE</h2><span class="contract-pill put-pill" id="put-symbol">Waiting for option chain</span></div>
+              <div class="chart-title-row"><span class="chart-index put-index">03</span><h2 id="put-title">Nearest NIFTY PE</h2><span class="contract-pill put-pill" id="put-symbol">Waiting for option chain</span></div>
               <div class="chart-subrow"><p id="put-subtitle">Closest put strike to the current NIFTY spot price</p><div class="contract-nav" role="group" aria-label="Change put option strike"><button type="button" data-contract-nav="put" data-direction="-1" aria-label="Previous put strike" disabled>‹</button><button type="button" data-contract-nav="put" data-direction="1" aria-label="Next put strike" disabled>›</button></div><button class="buy-button" type="button" data-paper-buy="put">Buy</button></div>
             </div>
-            <label class="interval-control"><span>INTERVAL</span><select id="interval-put" data-series="put" aria-label="Put chart interval"><option value="1">1m</option><option value="2">2m</option><option value="3">3m</option><option value="5" selected>5m</option><option value="15">15m</option><option value="30">30m</option><option value="60">1h</option><option value="1D">1D</option></select></label>
+            <label class="interval-control"><span>INTERVAL</span><select id="interval-put" data-series="put" aria-label="Put chart interval"><option value="1">1m</option><option value="5" selected>5m</option><option value="15">15m</option><option value="30">30m</option><option value="60">1h</option><option value="1D">1D</option></select></label>
           </header>
           <div class="indicator-legend" aria-label="Exponential moving averages">
-            <span class="ema-legend-item"><i class="ema-swatch ema-50"></i>EMA 50 <b id="ema-put-50">—</b></span><span class="ema-legend-item"><i class="ema-swatch ema-100"></i>EMA 100 <b id="ema-put-100">—</b></span><span class="ema-legend-item"><i class="ema-swatch ema-200"></i>EMA 200 <b id="ema-put-200">—</b></span>
-            <div class="chart-markup-tools"><button type="button" class="chart-tool-button" data-indicator-toggle="put" aria-label="Turn off put chart EMAs" aria-pressed="true">EMA On</button><button type="button" class="chart-tool-button" data-trendline-toggle="put" aria-label="Draw a trend line on the put chart">↗ Line</button><button type="button" class="chart-tool-button" data-trendline-clear="put" aria-label="Remove put chart trend lines" disabled>Clear</button></div>
+            <span class="ema-legend-item" data-ema-legend="put-0"><i class="ema-swatch"></i><span class="ema-legend-name">EMA 50</span> <b id="ema-put-0">—</b></span><span class="ema-legend-item" data-ema-legend="put-1"><i class="ema-swatch"></i><span class="ema-legend-name">EMA 100</span> <b id="ema-put-1">—</b></span><span class="ema-legend-item" data-ema-legend="put-2"><i class="ema-swatch"></i><span class="ema-legend-name">EMA 200</span> <b id="ema-put-2">—</b></span>
+            <div class="chart-markup-tools"><button type="button" class="chart-tool-button indicator-settings-button" data-indicator-settings="put" aria-label="Open put chart indicator settings" title="Indicator settings" aria-haspopup="dialog" aria-expanded="false">⚙</button><button type="button" class="chart-tool-button" data-trendline-toggle="put" aria-label="Draw a trend line on the put chart">↗ Line</button><button type="button" class="chart-tool-button trendline-extend-toggle is-active" data-trendline-extend="put" aria-label="Toggle extend trend lines right" aria-pressed="true">→ Right</button><button type="button" class="chart-tool-button" data-trendline-clear="put" aria-label="Remove put chart trend lines" disabled>Clear</button></div>
             <div class="chart-zoom" role="group" aria-label="Put chart zoom"><button type="button" data-chart-zoom="put" data-action="out" aria-label="Zoom out put chart">−</button><button type="button" data-chart-zoom="put" data-action="in" aria-label="Zoom in put chart">+</button><button type="button" data-chart-zoom="put" data-action="reset" aria-label="Reset put chart view">Reset</button></div>
           </div>
-          <div class="chart-body"><svg class="candlestick-chart" id="chart-put" viewBox="0 0 760 180" preserveAspectRatio="none" role="img" aria-label="Nearest NIFTY put option chart"><title>Drag the chart to pan. Drag the right price scale vertically to expand or compress prices. Use zoom buttons or mouse wheel to zoom.</title><g></g></svg><div class="time-axis" id="time-axis-put" aria-label="Put chart date axis" hidden></div><div class="chart-empty" id="empty-put"><span class="loading-mark">⌁</span><span>Waiting for market data</span></div></div>
+          <div class="chart-body"><svg class="candlestick-chart" id="chart-put" viewBox="0 0 760 180" preserveAspectRatio="none" role="img" aria-label="Nearest NIFTY put option chart"><title>Drag the chart to pan. Drag the right price scale vertically to expand or compress prices. Use zoom buttons or mouse wheel to zoom.</title><g></g></svg><div class="time-axis" id="time-axis-put" aria-label="Put chart date axis" hidden></div><div class="chart-empty" id="empty-put"><span class="loading-mark">⌁</span><span>Waiting for market data</span></div><button class="chart-latest-button" type="button" data-chart-latest="put" aria-label="Jump to latest candles for NIFTY PE" title="Go to latest candles" hidden>→</button></div>
           <footer class="chart-card-footer"><span id="status-put">No candles loaded</span><span id="last-put">—</span></footer>
-        </article>
-
-        <article class="chart-card" data-chart-card="spot-intraday">
-          <header class="chart-card-header">
-            <div class="chart-heading">
-              <div class="chart-title-row"><span class="chart-index spot-index">03</span><h2>NIFTY 50 Spot</h2><span class="contract-pill spot-pill">INDEX</span></div>
-              <p>Intraday spot price · historical OHLC</p>
-            </div>
-            <label class="interval-control"><span>INTERVAL</span><select id="interval-spot-intraday" data-series="spot-intraday" aria-label="Intraday spot chart interval"><option value="1">1m</option><option value="2">2m</option><option value="3">3m</option><option value="5" selected>5m</option><option value="15">15m</option><option value="30">30m</option><option value="60">1h</option><option value="1D">1D</option></select></label>
-          </header>
-          <div class="indicator-legend" aria-label="Exponential moving averages">
-            <span class="ema-legend-item"><i class="ema-swatch ema-50"></i>EMA 50 <b id="ema-spot-intraday-50">—</b></span><span class="ema-legend-item"><i class="ema-swatch ema-100"></i>EMA 100 <b id="ema-spot-intraday-100">—</b></span><span class="ema-legend-item"><i class="ema-swatch ema-200"></i>EMA 200 <b id="ema-spot-intraday-200">—</b></span>
-            <div class="chart-markup-tools"><button type="button" class="chart-tool-button" data-indicator-toggle="spot-intraday" aria-label="Turn off intraday spot chart EMAs" aria-pressed="true">EMA On</button><button type="button" class="chart-tool-button" data-trendline-toggle="spot-intraday" aria-label="Draw a trend line on the intraday spot chart">↗ Line</button><button type="button" class="chart-tool-button" data-trendline-clear="spot-intraday" aria-label="Remove intraday spot chart trend lines" disabled>Clear</button></div>
-            <div class="chart-zoom" role="group" aria-label="Intraday spot chart zoom"><button type="button" data-chart-zoom="spot-intraday" data-action="out" aria-label="Zoom out intraday spot chart">−</button><button type="button" data-chart-zoom="spot-intraday" data-action="in" aria-label="Zoom in intraday spot chart">+</button><button type="button" data-chart-zoom="spot-intraday" data-action="reset" aria-label="Reset intraday spot chart view">Reset</button></div>
-          </div>
-          <div class="chart-body"><svg class="candlestick-chart" id="chart-spot-intraday" viewBox="0 0 760 180" preserveAspectRatio="none" role="img" aria-label="NIFTY spot five minute chart"><title>Drag the chart to pan. Drag the right price scale vertically to expand or compress prices. Use zoom buttons or mouse wheel to zoom.</title><g></g></svg><div class="time-axis" id="time-axis-spot-intraday" aria-label="Intraday spot chart date axis" hidden></div><div class="chart-empty" id="empty-spot-intraday"><span class="loading-mark">⌁</span><span>Waiting for market data</span></div></div>
-          <footer class="chart-card-footer"><span id="status-spot-intraday">No candles loaded</span><span id="last-spot-intraday">—</span></footer>
         </article>
 
         <article class="chart-card" data-chart-card="spot-daily">
           <header class="chart-card-header">
             <div class="chart-heading">
-              <div class="chart-title-row"><span class="chart-index spot-index">04</span><h2>NIFTY 50 Spot</h2><span class="contract-pill spot-pill">INDEX</span></div>
-              <p>Daily spot price · historical OHLC</p>
+              <div class="chart-title-row"><span class="chart-index spot-index">04</span><h2 class="spot-title">NIFTY 50 Spot</h2><span class="contract-pill spot-pill">INDEX</span></div>
+              <p class="spot-subtitle">Daily spot price · historical OHLC</p>
             </div>
-            <label class="interval-control"><span>INTERVAL</span><select id="interval-spot-daily" data-series="spot-daily" aria-label="Daily spot chart interval"><option value="1">1m</option><option value="2">2m</option><option value="3">3m</option><option value="5">5m</option><option value="15">15m</option><option value="30">30m</option><option value="60">1h</option><option value="1D" selected>1D</option><option value="1W">1W</option><option value="1M">1M</option></select></label>
+            <label class="interval-control"><span>INTERVAL</span><select id="interval-spot-daily" data-series="spot-daily" aria-label="Daily spot chart interval"><option value="1">1m</option><option value="5">5m</option><option value="15">15m</option><option value="30">30m</option><option value="60">1h</option><option value="1D" selected>1D</option><option value="1W">1W</option><option value="1M">1M</option></select></label>
           </header>
           <div class="indicator-legend" aria-label="Exponential moving averages">
-            <span class="ema-legend-item"><i class="ema-swatch ema-50"></i>EMA 50 <b id="ema-spot-daily-50">—</b></span><span class="ema-legend-item"><i class="ema-swatch ema-100"></i>EMA 100 <b id="ema-spot-daily-100">—</b></span><span class="ema-legend-item"><i class="ema-swatch ema-200"></i>EMA 200 <b id="ema-spot-daily-200">—</b></span>
-            <div class="chart-markup-tools"><button type="button" class="chart-tool-button" data-indicator-toggle="spot-daily" aria-label="Turn off daily spot chart EMAs" aria-pressed="true">EMA On</button><button type="button" class="chart-tool-button" data-trendline-toggle="spot-daily" aria-label="Draw a trend line on the daily spot chart">↗ Line</button><button type="button" class="chart-tool-button" data-trendline-clear="spot-daily" aria-label="Remove daily spot chart trend lines" disabled>Clear</button></div>
+            <span class="ema-legend-item" data-ema-legend="spot-daily-0"><i class="ema-swatch"></i><span class="ema-legend-name">EMA 50</span> <b id="ema-spot-daily-0">—</b></span><span class="ema-legend-item" data-ema-legend="spot-daily-1"><i class="ema-swatch"></i><span class="ema-legend-name">EMA 100</span> <b id="ema-spot-daily-1">—</b></span><span class="ema-legend-item" data-ema-legend="spot-daily-2"><i class="ema-swatch"></i><span class="ema-legend-name">EMA 200</span> <b id="ema-spot-daily-2">—</b></span>
+            <div class="chart-markup-tools"><button type="button" class="chart-tool-button indicator-settings-button" data-indicator-settings="spot-daily" aria-label="Open spot-daily chart indicator settings" title="Indicator settings" aria-haspopup="dialog" aria-expanded="false">⚙</button><button type="button" class="chart-tool-button" data-trendline-toggle="spot-daily" aria-label="Draw a trend line on the daily spot chart">↗ Line</button><button type="button" class="chart-tool-button trendline-extend-toggle is-active" data-trendline-extend="spot-daily" aria-label="Toggle extend trend lines right" aria-pressed="true">→ Right</button><button type="button" class="chart-tool-button" data-trendline-clear="spot-daily" aria-label="Remove daily spot chart trend lines" disabled>Clear</button></div>
             <div class="chart-zoom" role="group" aria-label="Daily spot chart zoom"><button type="button" data-chart-zoom="spot-daily" data-action="out" aria-label="Zoom out daily spot chart">−</button><button type="button" data-chart-zoom="spot-daily" data-action="in" aria-label="Zoom in daily spot chart">+</button><button type="button" data-chart-zoom="spot-daily" data-action="reset" aria-label="Reset daily spot chart view">Reset</button></div>
           </div>
-          <div class="chart-body"><svg class="candlestick-chart" id="chart-spot-daily" viewBox="0 0 760 180" preserveAspectRatio="none" role="img" aria-label="NIFTY spot daily chart"><title>Drag the chart to pan. Drag the right price scale vertically to expand or compress prices. Use zoom buttons or mouse wheel to zoom.</title><g></g></svg><div class="time-axis" id="time-axis-spot-daily" aria-label="Daily spot chart date axis" hidden></div><div class="chart-empty" id="empty-spot-daily"><span class="loading-mark">⌁</span><span>Waiting for market data</span></div></div>
+          <div class="chart-body"><svg class="candlestick-chart" id="chart-spot-daily" viewBox="0 0 760 180" preserveAspectRatio="none" role="img" aria-label="NIFTY spot daily chart"><title>Drag the chart to pan. Drag the right price scale vertically to expand or compress prices. Use zoom buttons or mouse wheel to zoom.</title><g></g></svg><div class="time-axis" id="time-axis-spot-daily" aria-label="Daily spot chart date axis" hidden></div><div class="chart-empty" id="empty-spot-daily"><span class="loading-mark">⌁</span><span>Waiting for market data</span></div><button class="chart-latest-button" type="button" data-chart-latest="spot-daily" aria-label="Jump to latest candles for NIFTY spot daily" title="Go to latest candles" hidden>→</button></div>
           <footer class="chart-card-footer"><span id="status-spot-daily">No candles loaded</span><span id="last-spot-daily">—</span></footer>
         </article>
       </section>
@@ -137,6 +145,21 @@
         <div class="orders-total-pnl"><span>Total Profit/Loss</span><strong id="orders-total-pnl">₹0.00</strong></div>
         <section class="order-group" aria-labelledby="open-orders-heading"><h2 id="open-orders-heading">Open positions</h2><div id="open-orders-list" class="orders-list" aria-live="polite"></div></section>
         <section class="order-group" id="completed-orders-group" aria-labelledby="completed-orders-heading" hidden><h2 id="completed-orders-heading">Completed trades</h2><div id="completed-orders-list" class="orders-list"></div></section>
+      </section>
+
+      <section class="news-view" id="news-view" aria-labelledby="news-title" hidden>
+        <div class="news-page-heading">
+          <div><span class="eyebrow">MARKET EVENTS</span><h1 id="news-title">Latest News</h1><p>Headlines and events that may affect NIFTY or Bank NIFTY.</p></div>
+          <button class="button button-secondary" id="refresh-news" type="button">Refresh</button>
+        </div>
+        <div class="news-note">Direction is a rough headline-based signal, not a price forecast. Open the linked source to review context.</div>
+        <div class="news-table-wrap">
+          <table class="news-table">
+            <thead><tr><th scope="col">Important News</th><th scope="col">Date</th><th scope="col">Affecting</th><th scope="col">Possible impact</th></tr></thead>
+            <tbody id="news-rows"><tr><td colspan="4" class="news-status">Open Latest News to load current headlines.</td></tr></tbody>
+          </table>
+        </div>
+        <p class="news-updated" id="news-updated" aria-live="polite"></p>
       </section>
     </main>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>

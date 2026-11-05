@@ -14,7 +14,10 @@ import os
 import secrets
 import threading
 import time
+import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -33,11 +36,122 @@ FYERS_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
-ALLOWED_UNDERLYINGS = {"NSE:NIFTY50-INDEX"}
+ALLOWED_UNDERLYINGS = {"NSE:NIFTY50-INDEX", "NSE:NIFTYBANK-INDEX"}
 
 _pending_state: str | None = None
 _access_token: str | None = None
 _state_lock = threading.Lock()
+_news_cache: dict | None = None
+_news_cache_time = 0.0
+_news_cache_lock = threading.Lock()
+
+NEWS_SEARCHES = (
+    "India (Nifty OR Bank Nifty OR stock market OR RBI OR banks OR inflation OR GDP)",
+    "India (war OR geopolitical OR election OR government OR budget OR crude oil OR tariff) economy market",
+)
+NEWS_UPSIDE_TERMS = (
+    "rally", "rallies", "gains", "surge", "surges", "inflow", "rate cut", "cuts rates",
+    "easing inflation", "eases inflation", "beats estimates", "upgrade", "record high",
+    "falling oil", "oil slides", "ceasefire", "peace deal", "strong growth", "positive outlook",
+)
+NEWS_DOWNSIDE_TERMS = (
+    "war", "attack", "escalat", "crisis", "tariff", "sanction", "crude jumps", "oil prices rise",
+    "inflation rises", "rate hike", "rate hikes", "selloff", "sell-off", "decline", "drops", "plunge",
+    "losses", "weak outlook", "outflow", "downgrade", "default", "political turmoil", "uncertainty",
+)
+
+
+def classify_news(title: str) -> tuple[list[str], str]:
+    normalized = title.lower()
+    bank_related = any(term in normalized for term in (
+        "bank", "banking", "rbi", "lender", "credit", "interest rate", "loan", "nbfc", "financial sector",
+    ))
+    broad_market = any(term in normalized for term in (
+        "war", "geopolit", "election", "government", "budget", "crude", "oil", "tariff", "india market",
+        "indian stocks", "inflation", "gdp", "rupee", "global market", "trade deal",
+    ))
+    if bank_related:
+        indices = ["NIFTY", "BANK NIFTY"]
+    elif broad_market:
+        indices = ["NIFTY", "BANK NIFTY"]
+    elif "nifty" in normalized:
+        indices = ["NIFTY"]
+    else:
+        indices = ["NIFTY", "BANK NIFTY"]
+
+    upside = sum(term in normalized for term in NEWS_UPSIDE_TERMS)
+    downside = sum(term in normalized for term in NEWS_DOWNSIDE_TERMS)
+    if upside > downside:
+        direction = "Upside"
+    elif downside > upside:
+        direction = "Downside"
+    else:
+        direction = "Mixed / unclear"
+    return indices, direction
+
+
+def fetch_news_feed(search: str) -> list[dict]:
+    query = urlencode({"q": search, "hl": "en-IN", "gl": "IN", "ceid": "IN:en"})
+    request = Request(
+        f"https://news.google.com/rss/search?{query}",
+        headers={"Accept": "application/rss+xml, application/xml, text/xml", "User-Agent": FYERS_USER_AGENT},
+    )
+    try:
+        with urlopen(request, timeout=12) as response:
+            root = ET.fromstring(response.read())
+    except (URLError, TimeoutError, ET.ParseError, OSError):
+        return []
+
+    items = []
+    for item in root.findall(".//item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        if not title or not link or not link.startswith(("https://", "http://")):
+            continue
+        published = item.findtext("pubDate") or ""
+        try:
+            published_at = parsedate_to_datetime(published).astimezone(timezone.utc).isoformat()
+        except (TypeError, ValueError, OverflowError):
+            published_at = ""
+        source = (item.findtext("source") or "").strip()
+        if not source and " - " in title:
+            title, source = title.rsplit(" - ", 1)
+        indices, direction = classify_news(title)
+        items.append({
+            "title": title.strip(),
+            "url": link,
+            "source": source or "Google News",
+            "publishedAt": published_at,
+            "indices": indices,
+            "direction": direction,
+        })
+    return items
+
+
+def latest_news(force: bool = False) -> dict:
+    global _news_cache, _news_cache_time
+    with _news_cache_lock:
+        if not force and _news_cache is not None and time.monotonic() - _news_cache_time < 300:
+            return _news_cache
+    with ThreadPoolExecutor(max_workers=len(NEWS_SEARCHES)) as executor:
+        batches = list(executor.map(fetch_news_feed, NEWS_SEARCHES))
+    seen = set()
+    items = []
+    for item in sorted((item for batch in batches for item in batch), key=lambda entry: entry["publishedAt"], reverse=True):
+        key = item["title"].casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(item)
+    response = {
+        "items": items[:40],
+        "fetchedAt": datetime.now(timezone.utc).isoformat(),
+        "error": "News feeds could not be reached. Check your internet connection and retry." if not items else "",
+    }
+    with _news_cache_lock:
+        _news_cache = response
+        _news_cache_time = time.monotonic()
+    return response
 
 
 def load_local_env() -> None:
@@ -170,6 +284,11 @@ class AppHandler(SimpleHTTPRequestHandler):
         global _pending_state, _access_token
         parsed = urlsplit(self.path)
 
+        if parsed.path == "/api/news":
+            force = parse_qs(parsed.query).get("refresh", [""])[0] == "1"
+            self.send_json(200, latest_news(force=force))
+            return
+
         if parsed.path == "/api/status":
             self.send_json(200, {"configured": config()["configured"], "connected": _access_token is not None})
             return
@@ -199,13 +318,13 @@ class AppHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/market/quote":
             query = parse_qs(parsed.query)
             symbol = query.get("symbol", ["NSE:NIFTY50-INDEX"])[0]
-            is_nifty_option = (
+            is_index_option = (
                 len(symbol) <= 64
-                and symbol.startswith("NSE:NIFTY")
+                and symbol.startswith(("NSE:NIFTY", "NSE:BANKNIFTY"))
                 and symbol.endswith(("CE", "PE"))
                 and all(character.isalnum() or character in ":-_" for character in symbol)
             )
-            if symbol not in ALLOWED_UNDERLYINGS and not is_nifty_option:
+            if symbol not in ALLOWED_UNDERLYINGS and not is_index_option:
                 self.send_json(400, {"error": "Unsupported symbol."})
                 return
             payload, status, error = fyers_data_get("quotes", {"symbols": symbol})
@@ -219,7 +338,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             query = parse_qs(parsed.query)
             symbol = query.get("symbol", ["NSE:NIFTY50-INDEX"])[0]
             resolution = query.get("resolution", ["5"])[0]
-            allowed_resolutions = {"1", "2", "3", "5", "15", "30", "60", "1D", "1W", "1M"}
+            allowed_resolutions = {"1", "5", "15", "30", "60", "1D", "1W", "1M"}
             if (
                 len(symbol) > 64
                 or not symbol.startswith("NSE:")

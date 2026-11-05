@@ -1,4 +1,13 @@
-const SPOT_SYMBOL = 'NSE:NIFTY50-INDEX';
+const UNDERLYINGS = {
+  NIFTY: { symbol: 'NSE:NIFTY50-INDEX', label: 'NIFTY 50', shortLabel: 'NIFTY', lotSize: 65 },
+  BANKNIFTY: { symbol: 'NSE:NIFTYBANK-INDEX', label: 'BANK NIFTY', shortLabel: 'BANKNIFTY', lotSize: 30 },
+};
+const underlyingStorageKey = 'options-desk-underlying';
+let currentUnderlying = localStorage.getItem(underlyingStorageKey) in UNDERLYINGS
+  ? localStorage.getItem(underlyingStorageKey)
+  : 'NIFTY';
+function spotSymbol() { return UNDERLYINGS[currentUnderlying].symbol; }
+function underlyingLabel() { return UNDERLYINGS[currentUnderlying].label; }
 const toast = document.querySelector('#toast');
 let toastTimer;
 let currentSpotPrice = null;
@@ -9,19 +18,28 @@ let optionContracts = { call: [], put: [] };
 let selectedOptionIndex = { call: -1, put: -1 };
 let optionLoading = { call: false, put: false };
 let busy = false;
+let newsLoading = false;
 
 const series = {
   call: { symbol: '', interval: '5' },
   put: { symbol: '', interval: '5' },
-  'spot-intraday': { symbol: SPOT_SYMBOL, interval: '5' },
-  'spot-daily': { symbol: SPOT_SYMBOL, interval: '1D' },
+  'spot-intraday': { symbol: UNDERLYINGS[currentUnderlying].symbol, interval: '60' },
+  'spot-daily': { symbol: UNDERLYINGS[currentUnderlying].symbol, interval: '1D' },
 };
 const chartData = {};
 const chartViews = {};
 const seriesRequestIds = {};
+const workspacesStorageKey = 'options-desk-chart-workspaces';
+const defaultEmaSettings = [
+  { period: 50, color: '#f59e0b', enabled: true },
+  { period: 100, color: '#3b82f6', enabled: true },
+  { period: 200, color: '#000000', enabled: true },
+];
 const chartDrawState = Object.fromEntries(['call', 'put', 'spot-intraday', 'spot-daily'].map((kind) => [kind, {
   emaVisible: true,
+  emas: defaultEmaSettings.map((ema) => ({ ...ema })),
   drawTrendline: false,
+  extendTrendlineRight: true,
   trendlines: [],
   preview: null,
 }]));
@@ -69,7 +87,7 @@ function setSpotQuote(payload) {
   const quotes = payload.d || payload.data?.d || [];
   const quote = quotes.find((entry) => entry.s === 'ok' && entry.v) || quotes[0];
   const price = Number(quote?.v?.lp);
-  if (!Number.isFinite(price)) throw new Error('FYERS did not return the NIFTY spot quote.');
+  if (!Number.isFinite(price)) throw new Error(`FYERS did not return the ${underlyingLabel()} spot quote.`);
   currentSpotPrice = price;
   document.querySelector('#spot-price').textContent = `₹${formatNumber(price)}`;
   const change = Number(quote.v.ch);
@@ -82,7 +100,14 @@ function setSpotQuote(payload) {
   } else {
     changeNode.textContent = 'Spot quote received';
   }
-  document.querySelector('#market-caption').textContent = 'NIFTY spot from FYERS · option charts use the nearest available strikes.';
+  document.querySelector('#spot-eyebrow').textContent = `NSE · ${underlyingLabel()} SPOT`;
+  document.querySelectorAll('.spot-title').forEach((node) => { node.textContent = `${underlyingLabel()} Spot`; });
+  document.querySelectorAll('.spot-subtitle').forEach((node, index) => {
+    node.textContent = `${index === 0 ? 'Spot' : 'Daily'} ${underlyingLabel().toLowerCase()} price · historical OHLC`;
+  });
+  document.querySelector('#call-subtitle').textContent = `Closest call strike to the current ${underlyingLabel()} spot price`;
+  document.querySelector('#put-subtitle').textContent = `Closest put strike to the current ${underlyingLabel()} spot price`;
+  document.querySelector('#market-caption').textContent = `${underlyingLabel()} spot from FYERS · option charts use the nearest available strikes.`;
 }
 
 function renderExpiryOptions(expiryData) {
@@ -132,7 +157,7 @@ function updateContractNav(kind) {
 
 function setSeriesLabel(kind, contract) {
   const strike = formatNumber(contract.strike_price, 0);
-  const label = `NIFTY ${strike} ${kind === 'call' ? 'CE' : 'PE'}`;
+  const label = `${UNDERLYINGS[currentUnderlying].shortLabel} ${strike} ${kind === 'call' ? 'CE' : 'PE'}`;
   document.querySelector(`#${kind}-title`).textContent = label;
   document.querySelector(`#${kind}-symbol`).textContent = `${strike} ${kind === 'call' ? 'CE' : 'PE'}`;
   const distance = Number(contract.strike_price) - currentSpotPrice;
@@ -182,6 +207,8 @@ function showEmpty(kind, message, isError = false) {
   empty.append(mark, text);
   empty.classList.toggle('error', isError);
   empty.hidden = false;
+  const latestButton = document.querySelector(`[data-chart-latest="${kind}"]`);
+  if (latestButton) latestButton.hidden = true;
 }
 
 function makeSvgElement(name, attributes) {
@@ -260,6 +287,9 @@ function drawCandles(kind, payload, symbol, interval) {
   const top = 6;
   const bottom = 174;
   const y = (price) => bottom - ((price - pricesLow) / span) * (bottom - top);
+  const currentPrice = candles[candles.length - 1][4];
+  const currentPriceY = y(currentPrice);
+  const currentLabelY = Math.max(top + 8, Math.min(bottom - 8, currentPriceY));
   const gap = (right - left) / view.window;
   const width = Math.max(1.4, Math.min(8, gap * 0.58));
   const gridGroup = makeSvgElement('g', { class: 'price-grid' });
@@ -267,6 +297,12 @@ function drawCandles(kind, payload, symbol, interval) {
   const emaGroup = makeSvgElement('g', { class: 'ema-layer' });
   emaGroup.style.display = drawState.emaVisible ? '' : 'none';
   const trendGroup = makeSvgElement('g', { class: 'trendline-layer', 'clip-path': `url(#trend-clip-${kind})` });
+  const currentPriceGroup = makeSvgElement('g', { class: 'current-price-marker', 'aria-label': `Latest price ${formatAxisPrice(currentPrice)}` });
+  if (currentPriceY >= top && currentPriceY <= bottom) {
+    currentPriceGroup.append(makeSvgElement('line', {
+      x1: left, x2: axisLeft - 3, y1: currentPriceY.toFixed(2), y2: currentPriceY.toFixed(2), class: 'current-price-line',
+    }));
+  }
   const definitions = makeSvgElement('defs', {});
   const trendClip = makeSvgElement('clipPath', { id: `trend-clip-${kind}` });
   trendClip.append(makeSvgElement('rect', { x: left, y: top, width: right - left, height: bottom - top }));
@@ -295,6 +331,14 @@ function drawCandles(kind, payload, symbol, interval) {
   axisGroup.append(makeSvgElement('rect', {
     x: axisLeft, y: 0, width: 760 - axisLeft, height: 180, class: 'price-scale-hit',
   }));
+  axisGroup.append(makeSvgElement('rect', {
+    x: axisLeft + 2, y: (currentLabelY - 8).toFixed(2), width: 64, height: 16, rx: 2, class: 'current-price-label-bg',
+  }));
+  const currentLabel = makeSvgElement('text', {
+    x: axisTextX, y: (currentLabelY + 3).toFixed(2), class: 'current-price-label', 'text-anchor': 'end',
+  });
+  currentLabel.textContent = formatAxisPrice(currentPrice);
+  axisGroup.append(currentLabel);
 
   for (const [index, row] of candles.entries()) {
     const [, open, high, low, close] = row;
@@ -314,19 +358,35 @@ function drawCandles(kind, payload, symbol, interval) {
   }
 
   const closes = candles.map((row) => row[4]);
-  for (const period of [50, 100, 200]) {
+  for (const [emaIndex, ema] of drawState.emas.entries()) {
+    const period = ema.period;
     const values = calculateEma(closes, period);
     const points = values.map((value, index) => {
       const slot = firstDataIndex - startIndex + index;
       const x = left + (slot + 0.5) * gap;
       return `${index === 0 ? 'M' : 'L'}${x.toFixed(2)},${y(value).toFixed(2)}`;
     }).join(' ');
-    emaGroup.append(makeSvgElement('path', { d: points, class: `ema-line ema-line-${period}` }));
-    document.querySelector(`#ema-${kind}-${period}`).textContent = formatNumber(values[values.length - 1]);
+    const emaPath = makeSvgElement('path', { d: points, class: `ema-line ema-line-${emaIndex}` });
+    emaPath.style.stroke = ema.color;
+    if (emaIndex === 2 && ema.color.toLowerCase() === '#000000' && document.documentElement.dataset.theme !== 'light') {
+      emaPath.style.filter = 'drop-shadow(0 0 1px rgba(255,255,255,.95))';
+    }
+    emaPath.style.display = ema.enabled ? '' : 'none';
+    emaGroup.append(emaPath);
+    const valueNode = document.querySelector(`#ema-${kind}-${emaIndex}`);
+    const legendNode = document.querySelector(`[data-ema-legend="${kind}-${emaIndex}"]`);
+    if (valueNode) valueNode.textContent = formatNumber(values[values.length - 1]);
+    if (legendNode) {
+      legendNode.querySelector('.ema-legend-name').textContent = `EMA ${period}`;
+      legendNode.querySelector('.ema-swatch').style.backgroundColor = ema.color;
+      legendNode.style.display = ema.enabled ? '' : 'none';
+    }
   }
 
-  const visibleTrendlines = drawState.trendlines.filter((line) => line.symbol === symbol && line.interval === interval);
-  if (drawState.preview?.symbol === symbol && drawState.preview?.interval === interval) visibleTrendlines.push(drawState.preview);
+  const trendlineMatchesView = (line) => line.symbol === symbol
+    && (kind === 'spot-intraday' || line.interval === interval);
+  const visibleTrendlines = drawState.trendlines.filter(trendlineMatchesView);
+  if (drawState.preview && trendlineMatchesView(drawState.preview)) visibleTrendlines.push(drawState.preview);
   for (const line of visibleTrendlines) {
     const pointToSvg = (point) => {
       const index = nearestCandleIndex(allCandles, point.timestamp);
@@ -338,16 +398,24 @@ function drawCandles(kind, payload, symbol, interval) {
     };
     const start = pointToSvg(line.start);
     const end = pointToSvg(line.end);
+    const lineEnd = line.extendRight !== false && Math.abs(end.x - start.x) > 0.01
+      ? {
+        x: Math.max(end.x, right),
+        y: start.y + ((end.y - start.y) / (end.x - start.x)) * (Math.max(end.x, right) - start.x),
+      }
+      : end;
     trendGroup.append(makeSvgElement('line', {
       x1: start.x.toFixed(2), y1: start.y.toFixed(2),
-      x2: end.x.toFixed(2), y2: end.y.toFixed(2),
+      x2: lineEnd.x.toFixed(2), y2: lineEnd.y.toFixed(2),
       class: line.preview ? 'trend-line trend-line-preview' : 'trend-line',
     }));
   }
 
-  document.querySelector(`#chart-${kind} g`).replaceChildren(definitions, gridGroup, candleGroup, emaGroup, trendGroup, axisGroup);
+  document.querySelector(`#chart-${kind} g`).replaceChildren(definitions, gridGroup, candleGroup, emaGroup, trendGroup, currentPriceGroup, axisGroup);
   document.querySelector(`[data-chart-card="${kind}"]`).classList.toggle('indicators-hidden', !drawState.emaVisible);
+  updateIndicatorLegend(kind);
   document.querySelector(`#empty-${kind}`).hidden = true;
+  document.querySelector(`[data-chart-latest="${kind}"]`).hidden = false;
   renderTimeAxis(kind, allCandles, interval, startIndex, view.window);
   const latest = candles[candles.length - 1];
   const isDaily = interval === '1D' || interval === '1W' || interval === '1M';
@@ -415,7 +483,7 @@ async function updateNearestOptions(payload) {
   const data = payload.data || payload;
   renderExpiryOptions(data.expiryData || []);
   const entries = data.optionsChain || [];
-  if (!currentSpotPrice || !entries.length) throw new Error('The option chain or NIFTY spot quote is unavailable.');
+  if (!currentSpotPrice || !entries.length) throw new Error(`The option chain or ${underlyingLabel()} spot quote is unavailable.`);
   optionContracts = { call: getContracts(entries, 'CE'), put: getContracts(entries, 'PE') };
   selectedOptionIndex = {
     call: findNearestIndex(optionContracts.call),
@@ -431,7 +499,7 @@ async function updateNearestOptions(payload) {
 }
 
 async function loadOptionChain(timestamp = selectedExpiry) {
-  const query = new URLSearchParams({ symbol: SPOT_SYMBOL, strikecount: '25' });
+  const query = new URLSearchParams({ symbol: spotSymbol(), strikecount: '25' });
   if (timestamp) query.set('timestamp', timestamp);
   document.querySelector('#call-subtitle').textContent = 'Loading nearest available call strike…';
   document.querySelector('#put-subtitle').textContent = 'Loading nearest available put strike…';
@@ -443,8 +511,8 @@ async function loadOptionChain(timestamp = selectedExpiry) {
 
 async function loadSpotSeries() {
   return Promise.allSettled([
-    loadSeries('spot-intraday', SPOT_SYMBOL, series['spot-intraday'].interval),
-    loadSeries('spot-daily', SPOT_SYMBOL, series['spot-daily'].interval),
+    loadSeries('spot-intraday', spotSymbol(), series['spot-intraday'].interval),
+    loadSeries('spot-daily', spotSymbol(), series['spot-daily'].interval),
   ]);
 }
 
@@ -454,11 +522,12 @@ async function loadMarketData() {
   const refreshButton = document.querySelector('#refresh-all');
   refreshButton.disabled = true;
   setConnection('Loading market data');
-  document.querySelector('#market-caption').textContent = 'Fetching NIFTY spot, nearest option contracts, and historical candles…';
+  document.querySelector('#underlying-select').disabled = true;
+  document.querySelector('#market-caption').textContent = `Fetching ${underlyingLabel()} spot, nearest option contracts, and historical candles…`;
   try {
     const [quoteResult, chainResult] = await Promise.allSettled([
-      fetchApi(`/api/market/quote?${new URLSearchParams({ symbol: SPOT_SYMBOL })}`),
-      fetchApi(`/api/market/option-chain?${new URLSearchParams({ symbol: SPOT_SYMBOL, strikecount: '25', ...(selectedExpiry ? { timestamp: selectedExpiry } : {}) })}`),
+      fetchApi(`/api/market/quote?${new URLSearchParams({ symbol: spotSymbol() })}`),
+      fetchApi(`/api/market/option-chain?${new URLSearchParams({ symbol: spotSymbol(), strikecount: '25', ...(selectedExpiry ? { timestamp: selectedExpiry } : {}) })}`),
     ]);
     let quoteError = null;
     let chainError = null;
@@ -496,7 +565,210 @@ async function loadMarketData() {
     setNotice(error.message, true);
   } finally {
     refreshButton.disabled = false;
+    document.querySelector('#underlying-select').disabled = false;
     busy = false;
+  }
+}
+
+function readSavedWorkspaces() {
+  try {
+    const value = JSON.parse(localStorage.getItem(workspacesStorageKey) || '[]');
+    return Array.isArray(value) ? value.filter((workspace) => workspace && workspace.id && workspace.name) : [];
+  } catch {
+    return [];
+  }
+}
+
+function renderSavedWorkspaces(selectedId = document.querySelector('#workspace-select').value) {
+  const select = document.querySelector('#workspace-select');
+  const workspaces = readSavedWorkspaces().sort((a, b) => a.name.localeCompare(b.name));
+  if (workspaces.length) {
+    select.replaceChildren(...workspaces.map((workspace) => new Option(workspace.name, workspace.id)));
+    select.value = workspaces.some((workspace) => workspace.id === selectedId) ? selectedId : '';
+  } else {
+    select.replaceChildren(new Option('No saved workspaces', ''));
+  }
+  const hasSelection = Boolean(select.value);
+  document.querySelector('#load-workspace').disabled = !hasSelection;
+  document.querySelector('#delete-workspace').disabled = !hasSelection;
+}
+
+function captureWorkspace(name, id) {
+  const charts = {};
+  for (const kind of Object.keys(series)) {
+    const view = chartViews[kind];
+    charts[kind] = {
+      interval: series[kind].interval,
+      symbol: series[kind].symbol,
+      view: view ? {
+        window: view.window,
+        end: view.end,
+        total: view.total,
+        priceScale: view.priceScale,
+        priceOffset: view.priceOffset || 0,
+      } : null,
+      emaVisible: chartDrawState[kind].emaVisible,
+      emas: chartDrawState[kind].emas.map((ema) => ({ ...ema })),
+      extendTrendlineRight: chartDrawState[kind].extendTrendlineRight,
+      trendlines: chartDrawState[kind].trendlines.map((line) => ({ ...line })),
+    };
+  }
+  return {
+    id,
+    name,
+    savedAt: new Date().toISOString(),
+    underlying: currentUnderlying,
+    expiry: selectedExpiry,
+    contracts: { ...optionSymbols },
+    charts,
+  };
+}
+
+function saveWorkspace() {
+  const nameInput = document.querySelector('#workspace-name');
+  const name = nameInput.value.trim();
+  if (!name) {
+    nameInput.focus();
+    showNotice('Enter a name for this workspace before saving.');
+    return;
+  }
+  const workspaces = readSavedWorkspaces();
+  const existing = workspaces.find((workspace) => workspace.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+  const id = existing?.id || (window.crypto?.randomUUID?.() ?? `workspace-${Date.now()}`);
+  const workspace = captureWorkspace(name, id);
+  const next = existing
+    ? workspaces.map((item) => item.id === existing.id ? workspace : item)
+    : [...workspaces, workspace];
+  try {
+    localStorage.setItem(workspacesStorageKey, JSON.stringify(next));
+    renderSavedWorkspaces(id);
+    showNotice(existing ? `Workspace “${name}” updated.` : `Workspace “${name}” saved.`);
+  } catch {
+    showNotice('Could not save this workspace in browser storage.');
+  }
+}
+
+function restoreChartView(kind, savedChart) {
+  const data = chartData[kind];
+  const savedView = savedChart?.view;
+  if (!data || !savedView) return;
+  const total = data.candles.length;
+  const windowSize = Math.max(1, Math.min(Number(savedView.window) || total, total));
+  const wasAtLatest = Number(savedView.end) >= Number(savedView.total);
+  const savedEnd = Number(savedView.end) || total;
+  const end = wasAtLatest
+    ? total
+    : Math.max(windowSize, Math.min(total + windowSize - 1, savedEnd));
+  chartViews[kind] = {
+    window: windowSize,
+    end,
+    total,
+    priceScale: Math.max(0.12, Math.min(12, Number(savedView.priceScale) || 1)),
+    priceOffset: Number(savedView.priceOffset) || 0,
+  };
+}
+
+async function loadWorkspace(workspace) {
+  const loadButton = document.querySelector('#load-workspace');
+  loadButton.disabled = true;
+  try {
+    const savedUnderlying = UNDERLYINGS[workspace.underlying] ? workspace.underlying : 'NIFTY';
+    currentUnderlying = savedUnderlying;
+    localStorage.setItem(underlyingStorageKey, currentUnderlying);
+    document.querySelector('#underlying-select').value = currentUnderlying;
+    series['spot-intraday'].symbol = spotSymbol();
+    series['spot-daily'].symbol = spotSymbol();
+    currentSpotPrice = null;
+    selectedExpiry = '';
+    const savedCharts = workspace.charts || {};
+    for (const kind of Object.keys(series)) {
+      const select = document.querySelector(`#interval-${kind}`);
+      const requestedInterval = savedCharts[kind]?.interval;
+      const intervalExists = requestedInterval && [...select.options].some((option) => option.value === requestedInterval);
+      if (intervalExists) {
+        series[kind].interval = requestedInterval;
+        select.value = requestedInterval;
+      }
+      delete chartViews[kind];
+    }
+
+    const requestedExpiry = workspace.expiry || '';
+    let expiryFallback = false;
+    selectedExpiry = requestedExpiry;
+    const quote = await fetchApi(`/api/market/quote?${new URLSearchParams({ symbol: spotSymbol() })}`);
+    setSpotQuote(quote);
+    try {
+      await loadOptionChain(requestedExpiry);
+      if (requestedExpiry && selectedExpiry !== requestedExpiry) expiryFallback = true;
+    } catch (error) {
+      if (!requestedExpiry) throw error;
+      selectedExpiry = '';
+      await loadOptionChain('');
+      expiryFallback = true;
+    }
+
+    await loadSpotSeries();
+    const missingContract = [];
+    await Promise.allSettled(['call', 'put'].map(async (kind) => {
+      const savedSymbol = workspace.contracts?.[kind];
+      const index = savedSymbol ? optionContracts[kind].findIndex((contract) => contract.symbol === savedSymbol) : -1;
+      if (index >= 0 && index !== selectedOptionIndex[kind]) {
+        selectedOptionIndex[kind] = index;
+        await loadSelectedOption(kind);
+      } else if (savedSymbol && index < 0) {
+        missingContract.push(kind.toUpperCase());
+      }
+    }));
+
+    for (const kind of Object.keys(series)) {
+      const savedChart = savedCharts[kind] || {};
+      chartDrawState[kind].emaVisible = savedChart.emaVisible !== false;
+      chartDrawState[kind].emas = Array.isArray(savedChart.emas)
+        ? defaultEmaSettings.map((defaults, index) => {
+          const saved = savedChart.emas[index] || {};
+          return {
+            period: Number.isInteger(Number(saved.period)) && Number(saved.period) >= 2 && Number(saved.period) <= 500
+              ? Number(saved.period)
+              : defaults.period,
+            color: /^#[0-9a-f]{6}$/i.test(saved.color || '') ? saved.color : defaults.color,
+            enabled: saved.enabled !== false,
+          };
+        })
+        : defaultEmaSettings.map((ema) => ({ ...ema }));
+      chartDrawState[kind].trendlines = Array.isArray(savedChart.trendlines)
+        ? savedChart.trendlines.map((line) => ({ ...line }))
+        : [];
+      chartDrawState[kind].extendTrendlineRight = savedChart.extendTrendlineRight !== false;
+      chartDrawState[kind].drawTrendline = false;
+      chartDrawState[kind].preview = null;
+      restoreChartView(kind, savedChart);
+      updateChartTools(kind);
+      redrawChart(kind);
+    }
+
+    const notes = [];
+    if (expiryFallback) notes.push('saved expiry unavailable; loaded the nearest expiry');
+    if (missingContract.length) notes.push(`saved ${missingContract.join('/')} contract unavailable; loaded the nearest strike`);
+    showNotice(`Loaded “${workspace.name}”${notes.length ? ` (${notes.join('; ')})` : ''}.`);
+  } catch (error) {
+    showNotice(`Could not load workspace: ${error.message}`);
+  } finally {
+    loadButton.disabled = !document.querySelector('#workspace-select').value;
+  }
+}
+
+function deleteSelectedWorkspace() {
+  const select = document.querySelector('#workspace-select');
+  const id = select.value;
+  const workspace = readSavedWorkspaces().find((item) => item.id === id);
+  if (!workspace) return;
+  const workspaces = readSavedWorkspaces().filter((item) => item.id !== id);
+  try {
+    localStorage.setItem(workspacesStorageKey, JSON.stringify(workspaces));
+    renderSavedWorkspaces();
+    showNotice(`Workspace “${workspace.name}” deleted.`);
+  } catch {
+    showNotice('Could not delete this workspace.');
   }
 }
 
@@ -517,7 +789,7 @@ async function refreshConnectionStatus() {
       connectButton.textContent = 'Connect';
       connectButton.disabled = false;
       disconnectButton.disabled = true;
-      setNotice('Sign in to FYERS to load the NIFTY spot quote, options, and charts.', true);
+      setNotice(`Sign in to FYERS to load the ${underlyingLabel()} spot quote, options, and charts.`, true);
     } else {
       setConnection('Setup needed', false, true);
       connectButton.textContent = 'Connect';
@@ -792,7 +1064,10 @@ async function buyPaperOption(kind) {
   try {
     const payload = await fetchApi(`/api/market/quote?${new URLSearchParams({ symbol })}`);
     const entryPrice = quotePrice(payload, symbol);
-    const quantity = lots * 65;
+    const lotSize = Number(optionContracts[kind][selectedOptionIndex[kind]]?.lot_size)
+      || Number(optionContracts[kind][selectedOptionIndex[kind]]?.lotSize)
+      || UNDERLYINGS[currentUnderlying].lotSize;
+    const quantity = lots * lotSize;
     const openOrders = readPaperOrders().filter((order) => order.status === 'OPEN');
     const usedCapital = openOrders.reduce((sum, order) => sum + Number(order.entryPrice) * Number(order.quantity), 0);
     const orderValue = entryPrice * quantity;
@@ -808,7 +1083,7 @@ async function buyPaperOption(kind) {
       orderType: 'MARKET',
       status: 'OPEN',
       lots,
-      lotSize: 65,
+      lotSize,
       quantity,
       entryPrice,
       lastPrice: entryPrice,
@@ -881,6 +1156,10 @@ function setTheme(theme) {
   themeToggle.textContent = light ? '☾ Dark' : '☼ Light';
   themeToggle.setAttribute('aria-label', `Switch to ${light ? 'dark' : 'light'} mode`);
   themeToggle.setAttribute('aria-pressed', String(light));
+  for (const kind of Object.keys(chartDrawState)) {
+    if (chartData[kind]) redrawChart(kind);
+    else updateIndicatorLegend(kind);
+  }
 }
 try {
   setTheme(localStorage.getItem('options-desk-theme') || 'dark');
@@ -893,17 +1172,99 @@ themeToggle.addEventListener('click', () => {
   try { localStorage.setItem('options-desk-theme', nextTheme); } catch { /* Theme still applies for this page view. */ }
 });
 
+function renderNewsRows(items) {
+  const tbody = document.querySelector('#news-rows');
+  if (!Array.isArray(items) || !items.length) {
+    tbody.replaceChildren();
+    const row = tbody.insertRow();
+    const cell = row.insertCell();
+    cell.colSpan = 4;
+    cell.className = 'news-status';
+    cell.textContent = 'No relevant headlines were returned. Try Refresh later.';
+    return;
+  }
+  tbody.replaceChildren(...items.map((item) => {
+    const row = document.createElement('tr');
+    const headlineCell = row.insertCell();
+    const link = document.createElement('a');
+    link.className = 'news-headline';
+    link.textContent = item.title || 'Untitled headline';
+    try {
+      const url = new URL(item.url);
+      if (url.protocol === 'https:' || url.protocol === 'http:') {
+        link.href = url.href;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+      }
+    } catch { /* Keep invalid feed URLs as plain headline text. */ }
+    headlineCell.append(link);
+    const source = document.createElement('span');
+    source.className = 'news-source';
+    source.textContent = item.source || 'News source';
+    headlineCell.append(source);
+
+    const dateCell = row.insertCell();
+    const published = new Date(item.publishedAt);
+    dateCell.textContent = Number.isNaN(published.getTime())
+      ? '—'
+      : new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }).format(published);
+    dateCell.className = 'news-date';
+
+    const affectedCell = row.insertCell();
+    affectedCell.textContent = (Array.isArray(item.indices) ? item.indices : []).join(' · ') || 'NIFTY · BANK NIFTY';
+
+    const impactCell = row.insertCell();
+    const impact = document.createElement('span');
+    const direction = ['Upside', 'Downside'].includes(item.direction) ? item.direction : 'Mixed / unclear';
+    impact.className = `news-impact ${direction === 'Upside' ? 'impact-up' : direction === 'Downside' ? 'impact-down' : 'impact-mixed'}`;
+    impact.textContent = direction;
+    impactCell.append(impact);
+    return row;
+  }));
+}
+
+async function loadLatestNews(force = false) {
+  if (newsLoading) return;
+  newsLoading = true;
+  const refresh = document.querySelector('#refresh-news');
+  const updated = document.querySelector('#news-updated');
+  refresh.disabled = true;
+  refresh.textContent = 'Loading…';
+  updated.textContent = 'Loading latest headlines…';
+  try {
+    const result = await fetchApi(`/api/news${force ? '?refresh=1' : ''}`);
+    if (result.error) throw new Error(result.error);
+    renderNewsRows(result.items || []);
+    const stamp = result.fetchedAt ? new Date(result.fetchedAt) : new Date();
+    updated.textContent = `Updated ${new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }).format(stamp)} IST · ${result.items?.length || 0} headlines`;
+  } catch (error) {
+    renderNewsRows([]);
+    document.querySelector('#news-rows').querySelector('.news-status').textContent = `Could not load news: ${error.message}`;
+    updated.textContent = 'Check your internet connection and try Refresh.';
+  } finally {
+    refresh.disabled = false;
+    refresh.textContent = 'Refresh';
+    newsLoading = false;
+  }
+}
+
 function showAppView(view) {
   const workspaceOpen = view === 'workspace';
   document.querySelector('#workspace-view').hidden = !workspaceOpen;
   document.querySelector('#settings-view').hidden = view !== 'settings';
   document.querySelector('#orders-view').hidden = view !== 'orders';
+  document.querySelector('#news-view').hidden = view !== 'news';
   document.querySelector('#workspace-actions').hidden = !workspaceOpen;
   document.querySelector('#settings-actions').hidden = workspaceOpen;
   window.scrollTo(0, 0);
 }
 document.querySelector('#open-settings').addEventListener('click', () => showAppView('settings'));
 document.querySelector('#back-to-workspace').addEventListener('click', () => showAppView('workspace'));
+document.querySelector('#open-news').addEventListener('click', async () => {
+  showAppView('news');
+  await loadLatestNews();
+});
+document.querySelector('#refresh-news').addEventListener('click', () => loadLatestNews(true));
 document.querySelector('#open-orders').addEventListener('click', () => {
   renderPaperOrders();
   showAppView('orders');
@@ -944,30 +1305,177 @@ function zoomChart(kind, action, anchorRatio = 1) {
   redrawChart(kind);
 }
 
+function goToLatestCandles(kind) {
+  const view = chartViews[kind];
+  if (!chartData[kind] || !view) return;
+  view.end = view.total;
+  redrawChart(kind);
+}
+
 document.querySelectorAll('[data-chart-zoom]').forEach((button) => {
   button.addEventListener('click', () => zoomChart(button.dataset.chartZoom, button.dataset.action));
+});
+document.querySelectorAll('[data-chart-latest]').forEach((button) => {
+  button.addEventListener('click', () => goToLatestCandles(button.dataset.chartLatest));
 });
 
 function updateChartTools(kind) {
   const drawState = chartDrawState[kind];
-  const emaButton = document.querySelector(`[data-indicator-toggle="${kind}"]`);
-  emaButton.textContent = drawState.emaVisible ? 'EMA On' : 'EMA Off';
-  emaButton.setAttribute('aria-pressed', String(drawState.emaVisible));
-  emaButton.setAttribute('aria-label', `${drawState.emaVisible ? 'Turn off' : 'Turn on'} ${kind} chart EMAs`);
   const trendButton = document.querySelector(`[data-trendline-toggle="${kind}"]`);
   trendButton.textContent = drawState.drawTrendline ? 'Cancel line' : '↗ Line';
   trendButton.classList.toggle('is-active', drawState.drawTrendline);
   trendButton.setAttribute('aria-pressed', String(drawState.drawTrendline));
+  const extendButton = document.querySelector(`[data-trendline-extend="${kind}"]`);
+  extendButton.classList.toggle('is-active', drawState.extendTrendlineRight);
+  extendButton.setAttribute('aria-pressed', String(drawState.extendTrendlineRight));
+  extendButton.textContent = drawState.extendTrendlineRight ? '→ Right' : 'Right off';
   document.querySelector(`[data-trendline-clear="${kind}"]`).disabled = drawState.trendlines.length === 0;
   document.querySelector(`#chart-${kind}`).classList.toggle('draw-mode', drawState.drawTrendline);
 }
 
-document.querySelectorAll('[data-indicator-toggle]').forEach((button) => {
-  button.addEventListener('click', () => {
-    const kind = button.dataset.indicatorToggle;
-    chartDrawState[kind].emaVisible = !chartDrawState[kind].emaVisible;
-    updateChartTools(kind);
+function updateIndicatorLegend(kind) {
+  const drawState = chartDrawState[kind];
+  for (const [index, ema] of drawState.emas.entries()) {
+    const legend = document.querySelector(`[data-ema-legend="${kind}-${index}"]`);
+    if (!legend) continue;
+    legend.style.display = drawState.emaVisible && ema.enabled ? '' : 'none';
+    legend.querySelector('.ema-legend-name').textContent = `EMA ${ema.period}`;
+    const swatch = legend.querySelector('.ema-swatch');
+    swatch.style.backgroundColor = ema.color;
+    swatch.style.boxShadow = index === 2 && ema.color.toLowerCase() === '#000000'
+      && document.documentElement.dataset.theme !== 'light' ? '0 0 0 1px #d7e1ed' : '';
+  }
+}
+
+function createIndicatorDialog(kind) {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'indicator-dialog';
+  dialog.setAttribute('aria-labelledby', `indicator-dialog-title-${kind}`);
+
+  const panel = document.createElement('div');
+  panel.className = 'indicator-dialog-panel';
+  const heading = document.createElement('header');
+  heading.className = 'indicator-dialog-heading';
+  const title = document.createElement('h2');
+  title.id = `indicator-dialog-title-${kind}`;
+  const chartNames = {
+    call: `${UNDERLYINGS[currentUnderlying].shortLabel} CE`,
+    put: `${UNDERLYINGS[currentUnderlying].shortLabel} PE`,
+    'spot-intraday': `${underlyingLabel()} spot intraday`,
+    'spot-daily': `${underlyingLabel()} spot daily`,
+  };
+  title.textContent = `Indicator settings · ${chartNames[kind]}`;
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'indicator-dialog-close';
+  close.setAttribute('aria-label', 'Close indicator settings');
+  close.textContent = '×';
+  close.addEventListener('click', () => dialog.close());
+  heading.append(title, close);
+  panel.append(heading);
+
+  const showRow = document.createElement('label');
+  showRow.className = 'indicator-global-toggle';
+  const show = document.createElement('input');
+  show.type = 'checkbox';
+  show.dataset.showAllEmas = '';
+  const showText = document.createElement('span');
+  showText.textContent = 'Show EMA';
+  showRow.append(show, showText);
+  panel.append(showRow);
+
+  const rows = document.createElement('div');
+  rows.className = 'ema-settings-list';
+  for (let index = 0; index < defaultEmaSettings.length; index += 1) {
+    const row = document.createElement('div');
+    row.className = 'ema-settings-row';
+    const enabled = document.createElement('input');
+    enabled.type = 'checkbox';
+    enabled.dataset.emaEnabled = String(index);
+    enabled.setAttribute('aria-label', `Enable EMA ${index + 1}`);
+    const name = document.createElement('span');
+    name.textContent = 'EMA';
+    const period = document.createElement('input');
+    period.type = 'number';
+    period.min = '2';
+    period.max = '500';
+    period.step = '1';
+    period.dataset.emaPeriod = String(index);
+    period.setAttribute('aria-label', `EMA ${index + 1} period`);
+    const color = document.createElement('input');
+    color.type = 'color';
+    color.dataset.emaColor = String(index);
+    color.setAttribute('aria-label', `EMA ${index + 1} color`);
+    row.append(enabled, name, period, color);
+    rows.append(row);
+  }
+  panel.append(rows);
+
+  const actions = document.createElement('div');
+  actions.className = 'indicator-dialog-actions';
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'button button-secondary';
+  cancel.textContent = 'Cancel';
+  cancel.addEventListener('click', () => dialog.close());
+  const apply = document.createElement('button');
+  apply.type = 'button';
+  apply.className = 'button button-primary';
+  apply.textContent = 'Apply';
+  apply.addEventListener('click', () => {
+    const nextSettings = [];
+    for (let index = 0; index < defaultEmaSettings.length; index += 1) {
+      const period = panel.querySelector(`[data-ema-period="${index}"]`);
+      const value = Number(period.value);
+      if (!Number.isInteger(value) || value < 2 || value > 500) {
+        period.setCustomValidity('Enter a whole number from 2 to 500.');
+        period.reportValidity();
+        period.setCustomValidity('');
+        return;
+      }
+      nextSettings.push({
+        period: value,
+        color: panel.querySelector(`[data-ema-color="${index}"]`).value,
+        enabled: panel.querySelector(`[data-ema-enabled="${index}"]`).checked,
+      });
+    }
+    chartDrawState[kind].emaVisible = show.checked;
+    chartDrawState[kind].emas = nextSettings;
+    updateIndicatorLegend(kind);
     redrawChart(kind);
+    dialog.close();
+    showNotice('Indicator settings applied. Save the workspace to keep them there.');
+  });
+  actions.append(cancel, apply);
+  panel.append(actions);
+  dialog.append(panel);
+  dialog.addEventListener('close', () => {
+    document.querySelector(`[data-indicator-settings="${kind}"]`).setAttribute('aria-expanded', 'false');
+  });
+  document.body.append(dialog);
+  return dialog;
+}
+
+function openIndicatorSettings(kind, button) {
+  let dialog = document.querySelector(`#indicator-settings-${kind}`);
+  if (!dialog) {
+    dialog = createIndicatorDialog(kind);
+    dialog.id = `indicator-settings-${kind}`;
+  }
+  const state = chartDrawState[kind];
+  dialog.querySelector('[data-show-all-emas]').checked = state.emaVisible;
+  for (const [index, ema] of state.emas.entries()) {
+    dialog.querySelector(`[data-ema-enabled="${index}"]`).checked = ema.enabled;
+    dialog.querySelector(`[data-ema-period="${index}"]`).value = String(ema.period);
+    dialog.querySelector(`[data-ema-color="${index}"]`).value = ema.color;
+  }
+  button.setAttribute('aria-expanded', 'true');
+  dialog.showModal();
+}
+
+document.querySelectorAll('[data-indicator-settings]').forEach((button) => {
+  button.addEventListener('click', () => {
+    openIndicatorSettings(button.dataset.indicatorSettings, button);
   });
 });
 
@@ -979,6 +1487,17 @@ document.querySelectorAll('[data-trendline-toggle]').forEach((button) => {
     showNotice(chartDrawState[kind].drawTrendline
       ? 'Trend line mode: drag across the chart from the start point to the end point.'
       : 'Trend line mode cancelled.');
+  });
+});
+
+document.querySelectorAll('[data-trendline-extend]').forEach((button) => {
+  button.addEventListener('click', () => {
+    const kind = button.dataset.trendlineExtend;
+    chartDrawState[kind].extendTrendlineRight = !chartDrawState[kind].extendTrendlineRight;
+    updateChartTools(kind);
+    showNotice(chartDrawState[kind].extendTrendlineRight
+      ? 'New trend lines will extend to the right edge.'
+      : 'New trend lines will end at the second point.');
   });
 });
 
@@ -1066,8 +1585,11 @@ document.querySelectorAll('.candlestick-chart').forEach((svg) => {
           interval: chartData[kind].interval,
           start: dragStart.start,
           end,
+          extendRight: drawState.extendTrendlineRight,
         });
-        showNotice('Trend line added. Use Clear to remove it.');
+        showNotice(kind === 'spot-intraday'
+          ? 'Trend line added at its price and time position. It will stay anchored across intervals.'
+          : 'Trend line added. Use Clear to remove it.');
       }
       drawState.preview = null;
       drawState.drawTrendline = false;
@@ -1095,13 +1617,54 @@ document.querySelector('#connect-data').addEventListener('click', startLogin);
 document.querySelector('#disconnect-data').addEventListener('click', disconnectFyers);
 document.querySelector('#notice-connect').addEventListener('click', startLogin);
 document.querySelector('#refresh-all').addEventListener('click', loadMarketData);
+document.querySelector('#underlying-select').value = currentUnderlying;
+document.querySelectorAll('.spot-title').forEach((node) => { node.textContent = `${underlyingLabel()} Spot`; });
+document.querySelector('#spot-eyebrow').textContent = `NSE · ${underlyingLabel()} SPOT`;
+document.querySelector('#underlying-select').addEventListener('change', async (event) => {
+  const nextUnderlying = event.target.value;
+  if (!UNDERLYINGS[nextUnderlying] || busy) return;
+  currentUnderlying = nextUnderlying;
+  localStorage.setItem(underlyingStorageKey, currentUnderlying);
+  selectedExpiry = '';
+  selectedExpiryDate = '';
+  currentSpotPrice = null;
+  optionSymbols = { call: '', put: '' };
+  optionContracts = { call: [], put: [] };
+  selectedOptionIndex = { call: -1, put: -1 };
+  series['spot-intraday'].symbol = spotSymbol();
+  series['spot-daily'].symbol = spotSymbol();
+  document.querySelector('#spot-price').textContent = '—';
+  document.querySelector('#spot-change').textContent = 'Loading quote';
+  document.querySelectorAll('.spot-title').forEach((node) => { node.textContent = `${underlyingLabel()} Spot`; });
+  document.querySelectorAll('.spot-subtitle').forEach((node, index) => {
+    node.textContent = `${index === 0 ? 'Spot' : 'Daily'} ${underlyingLabel().toLowerCase()} price · historical OHLC`;
+  });
+  document.querySelector('#spot-eyebrow').textContent = `NSE · ${underlyingLabel()} SPOT`;
+  document.querySelector('#expiry-select').replaceChildren(new Option('Loading expiries…', ''));
+  document.querySelector('#expiry-select').disabled = true;
+  for (const kind of ['call', 'put']) showEmpty(kind, 'Loading option contracts…');
+  for (const kind of ['spot-intraday', 'spot-daily']) showEmpty(kind, 'Loading index candles…');
+  await loadMarketData();
+});
+document.querySelector('#save-workspace').addEventListener('click', saveWorkspace);
+document.querySelector('#workspace-select').addEventListener('change', (event) => {
+  const workspace = readSavedWorkspaces().find((item) => item.id === event.target.value);
+  document.querySelector('#workspace-name').value = workspace?.name || '';
+  renderSavedWorkspaces(event.target.value);
+});
+document.querySelector('#load-workspace').addEventListener('click', () => {
+  const workspace = readSavedWorkspaces().find((item) => item.id === document.querySelector('#workspace-select').value);
+  if (workspace) loadWorkspace(workspace);
+});
+document.querySelector('#delete-workspace').addEventListener('click', deleteSelectedWorkspace);
+renderSavedWorkspaces('');
 
 document.querySelector('#expiry-select').addEventListener('change', async (event) => {
   selectedExpiry = event.target.value;
   const selected = event.target.selectedOptions[0];
   selectedExpiryDate = selected?.textContent || '';
   try {
-    const result = await fetchApi(`/api/market/option-chain?${new URLSearchParams({ symbol: SPOT_SYMBOL, strikecount: '25', timestamp: selectedExpiry })}`);
+    const result = await fetchApi(`/api/market/option-chain?${new URLSearchParams({ symbol: spotSymbol(), strikecount: '25', timestamp: selectedExpiry })}`);
     await updateNearestOptions(result);
   } catch (error) {
     setConnection('Option chain unavailable', false, true);

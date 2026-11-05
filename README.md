@@ -1,12 +1,14 @@
 # Options Desk
 
-Options Desk is a local-first NIFTY options charting and paper-trading workspace. It uses FYERS API v3 for quotes, option-chain data, and historical candles. Paper orders are simulated in the browser and are never sent to FYERS as real orders.
+Options Desk is a local-first NIFTY and Bank NIFTY options charting and paper-trading workspace. It uses FYERS API v3 for quotes, option-chain data, and historical candles. Paper orders are simulated in the browser and are never sent to FYERS as real orders.
 
 ## Features
 
-- Four vertically stacked charts: nearest NIFTY CE, nearest NIFTY PE, intraday NIFTY spot, and daily NIFTY spot.
-- Per-chart intervals, including 1m, 2m, 3m, 5m, 15m, 30m, 1h, and calendar intervals where available.
-- EMA 50, EMA 100, and EMA 200, with per-chart visibility controls; chart panning, zoom, price-scale adjustment, and trend lines.
+- An index selector for NIFTY and Bank NIFTY, with matching spot, nearest CE/PE option, and historical charts.
+- Four vertically stacked charts: intraday spot, nearest CE, nearest PE, and daily spot for the selected index.
+- Per-chart intervals, including intraday and calendar intervals where available.
+- Per-chart configurable EMA periods, colors, and visibility; chart panning, zoom, price-scale adjustment, and trend lines.
+- Named browser-local workspaces that save the selected index, chart intervals, view state, indicators, trend lines, option expiry, and selected contracts.
 - Paper market buys using the current FYERS option quote, with configurable lot count, stop loss, and profit target.
 - Paper positions, manual exit, realized and unrealized P&L, and realized P&L added to saved trading capital.
 
