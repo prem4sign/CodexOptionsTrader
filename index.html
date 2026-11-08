@@ -18,7 +18,7 @@
           <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light mode" aria-pressed="false">☼ Light</button>
           <button class="icon-button" id="refresh-all" aria-label="Refresh all charts" title="Refresh all charts">↻</button>
           <button class="icon-button orders-icon" id="open-orders" type="button" aria-label="Open active orders" title="Active orders">▤</button>
-          <button class="button button-secondary latest-news-button" id="open-news" type="button" aria-label="Open latest market news">Latest News</button>
+          <button class="button button-secondary latest-news-button" id="open-news" type="button" aria-label="Open market verdict">Market Verdict</button>
           <button class="icon-button settings-gear" id="open-settings" type="button" aria-label="Open trading settings" title="Trading settings">⚙</button>
         </div>
         <div class="topbar-actions" id="settings-actions" hidden><button class="button button-secondary" id="back-to-workspace" type="button">← Back to charts</button></div>
@@ -30,6 +30,12 @@
           <div class="eyebrow"><span class="market-dot"></span> <span id="spot-eyebrow">NSE · NIFTY 50 SPOT</span></div>
           <div class="spot-row"><h1 id="spot-price">—</h1><span id="spot-change" class="spot-change">Waiting for quote</span></div>
           <p class="market-caption" id="market-caption">Connect your FYERS data app to load the session’s market data.</p>
+          <section class="paper-capital-summary" aria-label="Paper trading capital summary">
+            <div class="capital-summary-metric"><span>Total Capital</span><strong id="paper-total-capital">—</strong></div>
+            <div class="capital-summary-metric"><span>Trading Capital Used</span><strong id="paper-capital-used">—</strong></div>
+            <div class="capital-summary-metric"><span>Remaining Capital</span><strong id="paper-capital-remaining">—</strong></div>
+            <div class="capital-summary-metric"><span>Running Profit/Loss</span><strong id="paper-running-pnl">—</strong></div>
+          </section>
         </div>
         <div class="overview-controls">
           <label for="underlying-select">INDEX</label>
@@ -73,7 +79,7 @@
           <header class="chart-card-header">
             <div class="chart-heading">
               <div class="chart-title-row"><span class="chart-index call-index">02</span><h2 id="call-title">Nearest NIFTY CE</h2><span class="contract-pill call-pill" id="call-symbol">Waiting for option chain</span></div>
-              <div class="chart-subrow"><p id="call-subtitle">Closest call strike to the current NIFTY spot price</p><div class="contract-nav" role="group" aria-label="Change call option strike"><button type="button" data-contract-nav="call" data-direction="-1" aria-label="Previous call strike" disabled>‹</button><button type="button" data-contract-nav="call" data-direction="1" aria-label="Next call strike" disabled>›</button></div><button class="buy-button" type="button" data-paper-buy="call">Buy</button></div>
+              <div class="chart-subrow"><p id="call-subtitle">Closest call strike to the current NIFTY spot price</p><div class="contract-nav" role="group" aria-label="Change call option strike"><button type="button" data-contract-nav="call" data-direction="-1" aria-label="Previous call strike" disabled>‹</button><button type="button" data-contract-nav="call" data-direction="1" aria-label="Next call strike" disabled>›</button></div><button class="buy-button" type="button" data-paper-buy="call">Buy</button><button class="buy-button buy-without-sl-button" type="button" data-paper-buy-without-sl="call">Buy without SL</button></div>
             </div>
             <label class="interval-control"><span>INTERVAL</span><select id="interval-call" data-series="call" aria-label="Call chart interval"><option value="1">1m</option><option value="5" selected>5m</option><option value="15">15m</option><option value="30">30m</option><option value="60">1h</option><option value="1D">1D</option></select></label>
           </header>
@@ -90,7 +96,7 @@
           <header class="chart-card-header">
             <div class="chart-heading">
               <div class="chart-title-row"><span class="chart-index put-index">03</span><h2 id="put-title">Nearest NIFTY PE</h2><span class="contract-pill put-pill" id="put-symbol">Waiting for option chain</span></div>
-              <div class="chart-subrow"><p id="put-subtitle">Closest put strike to the current NIFTY spot price</p><div class="contract-nav" role="group" aria-label="Change put option strike"><button type="button" data-contract-nav="put" data-direction="-1" aria-label="Previous put strike" disabled>‹</button><button type="button" data-contract-nav="put" data-direction="1" aria-label="Next put strike" disabled>›</button></div><button class="buy-button" type="button" data-paper-buy="put">Buy</button></div>
+              <div class="chart-subrow"><p id="put-subtitle">Closest put strike to the current NIFTY spot price</p><div class="contract-nav" role="group" aria-label="Change put option strike"><button type="button" data-contract-nav="put" data-direction="-1" aria-label="Previous put strike" disabled>‹</button><button type="button" data-contract-nav="put" data-direction="1" aria-label="Next put strike" disabled>›</button></div><button class="buy-button" type="button" data-paper-buy="put">Buy</button><button class="buy-button buy-without-sl-button" type="button" data-paper-buy-without-sl="put">Buy without SL</button></div>
             </div>
             <label class="interval-control"><span>INTERVAL</span><select id="interval-put" data-series="put" aria-label="Put chart interval"><option value="1">1m</option><option value="5" selected>5m</option><option value="15">15m</option><option value="30">30m</option><option value="60">1h</option><option value="1D">1D</option></select></label>
           </header>
@@ -144,20 +150,21 @@
         <p class="orders-summary" id="orders-summary"></p>
         <div class="orders-total-pnl"><span>Total Profit/Loss</span><strong id="orders-total-pnl">₹0.00</strong></div>
         <section class="order-group" aria-labelledby="open-orders-heading"><h2 id="open-orders-heading">Open positions</h2><div id="open-orders-list" class="orders-list" aria-live="polite"></div></section>
-        <section class="order-group" id="completed-orders-group" aria-labelledby="completed-orders-heading" hidden><h2 id="completed-orders-heading">Completed trades</h2><div id="completed-orders-list" class="orders-list"></div></section>
+        <section class="order-group" id="completed-orders-group" aria-labelledby="completed-orders-heading" hidden><h2 id="completed-orders-heading">Completed trades</h2><div id="completed-orders-list" class="completed-trades-table-wrap"></div></section>
       </section>
 
       <section class="news-view" id="news-view" aria-labelledby="news-title" hidden>
         <div class="news-page-heading">
-          <div><span class="eyebrow">MARKET EVENTS</span><h1 id="news-title">Latest News</h1><p>Headlines and events that may affect NIFTY or Bank NIFTY.</p></div>
+          <div><span class="eyebrow">MARKET OUTLOOK</span><h1 id="news-title">Market Verdict</h1><p id="verdict-subtitle">A concise news-based read for NIFTY and BANK NIFTY.</p></div>
           <button class="button button-secondary" id="refresh-news" type="button">Refresh</button>
         </div>
-        <div class="news-note">Direction is a rough headline-based signal, not a price forecast. Open the linked source to review context.</div>
-        <div class="news-table-wrap">
-          <table class="news-table">
-            <thead><tr><th scope="col">Important News</th><th scope="col">Date</th><th scope="col">Affecting</th><th scope="col">Possible impact</th></tr></thead>
-            <tbody id="news-rows"><tr><td colspan="4" class="news-status">Open Latest News to load current headlines.</td></tr></tbody>
-          </table>
+        <div class="news-note">This is a rough headline sentiment summary, not a price prediction or trading recommendation. It does not account for chart structure, valuation, or unexpected events.</div>
+        <div id="verdict-content" class="verdict-content" aria-live="polite">
+          <div class="verdict-grid">
+            <article class="verdict-card"><span class="verdict-horizon">TODAY</span><h2 id="verdict-today-title">Waiting for headlines</h2><p id="verdict-today-detail">Refresh to analyze current news.</p></article>
+            <article class="verdict-card"><span class="verdict-horizon">NEXT FEW DAYS</span><h2 id="verdict-days-title">Waiting for headlines</h2><p id="verdict-days-detail">A broad read from recent headlines.</p></article>
+          </div>
+          <section class="verdict-drivers" aria-labelledby="verdict-drivers-title"><h2 id="verdict-drivers-title">Key headlines behind the view</h2><ul id="verdict-drivers-list"><li class="news-status">Open Market Verdict to load current headlines.</li></ul></section>
         </div>
         <p class="news-updated" id="news-updated" aria-live="polite"></p>
       </section>

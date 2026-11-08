@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api/index?route=/api/:path*" },
+    { "source": "/auth/login", "destination": "/api/index?route=/auth/login" },
+    { "source": "/fyers/callback", "destination": "/api/index?route=/fyers/callback" }
+  ],
+  "functions": {
+    "api/index.py": { "maxDuration": 60 }
+  }
+}

@@ -36,4 +36,15 @@ The server keeps the access token in memory only. Restarting the server clears t
 
 ## Cloud deployment
 
-Cloud hosting is not configured yet. Deployment will require updating the OAuth callback handling and setting the exact public HTTPS redirect URL in both the FYERS dashboard and the server environment. Do not deploy the local `.env` file or expose the App Secret or access token to browser code.
+The Vercel deployment uses a separate Python Function in `api/index.py`; the local `python server.py` path is unchanged. Vercel rewrites the existing `/api/*`, `/auth/login`, and `/fyers/callback` URLs to that function.
+
+Set these variables in the Vercel project's Production environment:
+
+- `FYERS_APP_ID`: App ID from the deployed FYERS non-trading app.
+- `FYERS_APP_SECRET`: its Secret ID.
+- `FYERS_REDIRECT_URI`: `https://codexoptionstrader.vercel.app/fyers/callback` (must exactly match the redirect URL in that FYERS app).
+- `FYERS_SESSION_KEY`: a Fernet key used to encrypt the OAuth state and FYERS access token in Secure, HttpOnly cookies. Generate it locally with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`; add the output directly to Vercel and do not commit or share it.
+
+Vercel installs the Python dependency from `requirements.txt`. After setting the variables, redeploy. The cloud function keeps no FYERS token in process memory; its encrypted session cookie works across serverless invocations. The local server continues to read its existing ignored `.env` and use the localhost callback. Never deploy `.env` or expose the App Secret or session key in browser code.
+
+The Vercel deployment currently exposes the app publicly. Before using it beyond personal testing, enable access protection for the deployment. Paper trades remain in each browser's local storage and do not sync between devices.

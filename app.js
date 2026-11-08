@@ -31,9 +31,15 @@ const chartViews = {};
 const seriesRequestIds = {};
 const workspacesStorageKey = 'options-desk-chart-workspaces';
 const defaultEmaSettings = [
-  { period: 50, color: '#f59e0b', enabled: true },
-  { period: 100, color: '#3b82f6', enabled: true },
-  { period: 200, color: '#000000', enabled: true },
+  { period: 50, color: '#f59e0b', enabled: true, timeframe: 'chart' },
+  { period: 100, color: '#3b82f6', enabled: true, timeframe: 'chart' },
+  { period: 200, color: '#000000', enabled: true, timeframe: 'chart' },
+];
+const emaHistoryCache = new Map();
+const emaHistoryRequests = new Map();
+const emaTimeframeOptions = [
+  ['chart', 'Chart interval'], ['1', '1m'], ['5', '5m'], ['15', '15m'],
+  ['30', '30m'], ['60', '1h'], ['1D', '1D'],
 ];
 const chartDrawState = Object.fromEntries(['call', 'put', 'spot-intraday', 'spot-daily'].map((kind) => [kind, {
   emaVisible: true,
@@ -227,6 +233,57 @@ function calculateEma(values, period) {
   });
 }
 
+function emaTimeframeLabel(timeframe, chartInterval) {
+  const resolution = timeframe === 'chart' ? chartInterval : timeframe;
+  if (resolution === '60') return '1h';
+  if (resolution === '1D') return '1D';
+  return `${resolution}m`;
+}
+
+function emaHistoryKey(symbol, timeframe) {
+  return `${symbol}|${timeframe}`;
+}
+
+function projectEmaToChart(sourceCandles, targetCandles, period, sourceTimeframe, targetTimeframe) {
+  const sourceValues = calculateEma(sourceCandles.map((row) => row[4]), period);
+  if (sourceTimeframe === targetTimeframe) return targetCandles.map((_, index) => sourceValues[index] ?? null);
+  const intervalSeconds = sourceTimeframe === '1D' ? 86400 : Number(sourceTimeframe) * 60;
+  let sourceIndex = -1;
+  return targetCandles.map((target) => {
+    while (sourceIndex + 1 < sourceCandles.length
+      && sourceCandles[sourceIndex + 1][0] + intervalSeconds <= target[0]) sourceIndex += 1;
+    return sourceIndex >= 0 ? sourceValues[sourceIndex] : null;
+  });
+}
+
+function ensureEmaHistory(kind, symbol, timeframe) {
+  const key = emaHistoryKey(symbol, timeframe);
+  const cached = emaHistoryCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < 60000) return;
+  if (emaHistoryRequests.has(key)) return;
+  const query = new URLSearchParams({ symbol, resolution: timeframe });
+  const request = fetchApi(`/api/market/history?${query}`)
+    .then((payload) => {
+      const candles = (payload.candles || payload.data?.candles || [])
+        .filter((row) => Array.isArray(row) && row.length >= 5 && row.slice(0, 5).every((value) => Number.isFinite(Number(value))))
+        .map((row) => row.slice(0, 5).map(Number))
+        .sort((a, b) => a[0] - b[0]);
+      if (!candles.length) throw new Error('No candles were returned for this EMA timeframe.');
+      emaHistoryCache.set(key, { candles, fetchedAt: Date.now(), error: '' });
+    })
+    .catch((error) => {
+      emaHistoryCache.set(key, { candles: [], fetchedAt: Date.now(), error: error.message || 'Could not load EMA history.' });
+    })
+    .finally(() => {
+      emaHistoryRequests.delete(key);
+      const chart = chartData[kind];
+      const stillNeeded = chart?.symbol === symbol && chartDrawState[kind].emaVisible
+        && chartDrawState[kind].emas.some((ema) => ema.enabled && ema.timeframe === timeframe && series[kind].interval !== timeframe);
+      if (stillNeeded) redrawChart(kind);
+    });
+  emaHistoryRequests.set(key, request);
+}
+
 function formatAxisPrice(value) {
   return value >= 1000
     ? Math.round(value).toLocaleString('en-IN')
@@ -296,6 +353,7 @@ function drawCandles(kind, payload, symbol, interval) {
   const candleGroup = makeSvgElement('g', { class: 'candle-layer' });
   const emaGroup = makeSvgElement('g', { class: 'ema-layer' });
   emaGroup.style.display = drawState.emaVisible ? '' : 'none';
+  const crossGroup = makeSvgElement('g', { class: 'ema-cross-layer', 'aria-label': '100 and 200 EMA crossovers' });
   const trendGroup = makeSvgElement('g', { class: 'trendline-layer', 'clip-path': `url(#trend-clip-${kind})` });
   const currentPriceGroup = makeSvgElement('g', { class: 'current-price-marker', 'aria-label': `Latest price ${formatAxisPrice(currentPrice)}` });
   if (currentPriceY >= top && currentPriceY <= bottom) {
@@ -357,15 +415,32 @@ function drawCandles(kind, payload, symbol, interval) {
     candleGroup.append(wick, body);
   }
 
-  const closes = candles.map((row) => row[4]);
+  const emaValuesByPeriod = new Map();
   for (const [emaIndex, ema] of drawState.emas.entries()) {
     const period = ema.period;
-    const values = calculateEma(closes, period);
+    const emaTimeframe = ema.timeframe || 'chart';
+    const sourceTimeframe = emaTimeframe === 'chart' ? interval : emaTimeframe;
+    const cacheKey = emaHistoryKey(symbol, sourceTimeframe);
+    const cachedHistory = sourceTimeframe === interval
+      ? { candles: allCandles, error: '' }
+      : emaHistoryCache.get(cacheKey);
+    const allValues = cachedHistory?.candles?.length
+      ? projectEmaToChart(cachedHistory.candles, allCandles, period, sourceTimeframe, interval)
+      : [];
+    const values = allValues.slice(firstDataIndex, firstDataIndex + candles.length);
+    emaValuesByPeriod.set(Number(period), { values, enabled: ema.enabled });
+    let hasPreviousPoint = false;
     const points = values.map((value, index) => {
+      if (!Number.isFinite(value)) {
+        hasPreviousPoint = false;
+        return '';
+      }
       const slot = firstDataIndex - startIndex + index;
       const x = left + (slot + 0.5) * gap;
-      return `${index === 0 ? 'M' : 'L'}${x.toFixed(2)},${y(value).toFixed(2)}`;
-    }).join(' ');
+      const command = `${hasPreviousPoint ? 'L' : 'M'}${x.toFixed(2)},${y(value).toFixed(2)}`;
+      hasPreviousPoint = true;
+      return command;
+    }).filter(Boolean).join(' ');
     const emaPath = makeSvgElement('path', { d: points, class: `ema-line ema-line-${emaIndex}` });
     emaPath.style.stroke = ema.color;
     if (emaIndex === 2 && ema.color.toLowerCase() === '#000000' && document.documentElement.dataset.theme !== 'light') {
@@ -375,11 +450,43 @@ function drawCandles(kind, payload, symbol, interval) {
     emaGroup.append(emaPath);
     const valueNode = document.querySelector(`#ema-${kind}-${emaIndex}`);
     const legendNode = document.querySelector(`[data-ema-legend="${kind}-${emaIndex}"]`);
-    if (valueNode) valueNode.textContent = formatNumber(values[values.length - 1]);
+    const latestEmaValue = values[values.length - 1];
+    if (valueNode) valueNode.textContent = Number.isFinite(latestEmaValue)
+      ? formatNumber(latestEmaValue)
+      : cachedHistory?.error ? 'Unavailable' : 'Loading…';
     if (legendNode) {
-      legendNode.querySelector('.ema-legend-name').textContent = `EMA ${period}`;
+      legendNode.querySelector('.ema-legend-name').textContent = `EMA ${period} · ${emaTimeframeLabel(emaTimeframe, interval)}`;
       legendNode.querySelector('.ema-swatch').style.backgroundColor = ema.color;
       legendNode.style.display = ema.enabled ? '' : 'none';
+    }
+  }
+
+  const fastEma = emaValuesByPeriod.get(100);
+  const slowEma = emaValuesByPeriod.get(200);
+  if (drawState.emaVisible && fastEma?.enabled && slowEma?.enabled) {
+    for (let index = 1; index < Math.min(fastEma.values.length, slowEma.values.length); index += 1) {
+      const previousDifference = fastEma.values[index - 1] - slowEma.values[index - 1];
+      const currentDifference = fastEma.values[index] - slowEma.values[index];
+      if (![previousDifference, currentDifference].every(Number.isFinite)) continue;
+      const bullish = previousDifference <= 0 && currentDifference > 0;
+      const bearish = previousDifference >= 0 && currentDifference < 0;
+      if (!bullish && !bearish) continue;
+      const slot = firstDataIndex - startIndex + index;
+      const x = left + (slot + 0.5) * gap;
+      const crossY = y((fastEma.values[index] + slowEma.values[index]) / 2);
+      if (x < left || x > right - 52 || crossY < top || crossY > bottom) continue;
+      const marker = makeSvgElement('g', {
+        class: `ema-cross-marker ${bullish ? 'ema-cross-bullish' : 'ema-cross-bearish'}`,
+        'aria-label': `${bullish ? 'Bullish' : 'Bearish'} 100 EMA crossed ${bullish ? 'above' : 'below'} 200 EMA`,
+      });
+      const title = makeSvgElement('title', {});
+      title.textContent = `${bullish ? 'Bullish' : 'Bearish'} 100 EMA crossed ${bullish ? 'above' : 'below'} 200 EMA`;
+      marker.append(title);
+      marker.append(makeSvgElement('circle', { cx: x.toFixed(2), cy: crossY.toFixed(2), r: 4, class: 'ema-cross-dot' }));
+      const label = makeSvgElement('text', { x: (x + 7).toFixed(2), y: (crossY - 5).toFixed(2), class: 'ema-cross-label' });
+      label.textContent = bullish ? '100/200 ↑' : '100/200 ↓';
+      marker.append(label);
+      crossGroup.append(marker);
     }
   }
 
@@ -411,7 +518,14 @@ function drawCandles(kind, payload, symbol, interval) {
     }));
   }
 
-  document.querySelector(`#chart-${kind} g`).replaceChildren(definitions, gridGroup, candleGroup, emaGroup, trendGroup, currentPriceGroup, axisGroup);
+  document.querySelector(`#chart-${kind} g`).replaceChildren(definitions, gridGroup, candleGroup, emaGroup, crossGroup, trendGroup, currentPriceGroup, axisGroup);
+  if (drawState.emaVisible) {
+    const neededTimeframes = new Set(drawState.emas
+      .filter((ema) => ema.enabled)
+      .map((ema) => ema.timeframe || 'chart')
+      .filter((timeframe) => timeframe !== 'chart' && timeframe !== interval));
+    neededTimeframes.forEach((timeframe) => ensureEmaHistory(kind, symbol, timeframe));
+  }
   document.querySelector(`[data-chart-card="${kind}"]`).classList.toggle('indicators-hidden', !drawState.emaVisible);
   updateIndicatorLegend(kind);
   document.querySelector(`#empty-${kind}`).hidden = true;
@@ -732,6 +846,7 @@ async function loadWorkspace(workspace) {
               : defaults.period,
             color: /^#[0-9a-f]{6}$/i.test(saved.color || '') ? saved.color : defaults.color,
             enabled: saved.enabled !== false,
+            timeframe: emaTimeframeOptions.some(([timeframe]) => timeframe === saved.timeframe) ? saved.timeframe : 'chart',
           };
         })
         : defaultEmaSettings.map((ema) => ({ ...ema }));
@@ -865,6 +980,7 @@ settingsForm.addEventListener('submit', (event) => {
   try {
     localStorage.setItem(settingsStorageKey, JSON.stringify(settings));
     settingsStatus.textContent = 'Your trading defaults are saved on this device.';
+    renderPaperOrders();
     showNotice('Trading settings saved.');
   } catch {
     settingsStatus.textContent = 'Could not save settings in this browser.';
@@ -946,43 +1062,197 @@ function createOrderCard(order) {
   actions.className = 'paper-order-actions';
   actions.append(status);
   if (order.status === 'OPEN') {
+    const partialButton = document.createElement('button');
+    partialButton.type = 'button';
+    partialButton.className = 'button order-partial-exit-button';
+    partialButton.textContent = 'Partial Exit';
+    partialButton.setAttribute('aria-label', `Partially exit paper position ${order.symbol}`);
+    partialButton.addEventListener('click', () => partialExitPaperPosition(order.id, partialButton));
     const exitButton = document.createElement('button');
     exitButton.type = 'button';
     exitButton.className = 'button order-exit-button';
     exitButton.textContent = 'Exit position';
     exitButton.setAttribute('aria-label', `Exit paper position ${order.symbol}`);
     exitButton.addEventListener('click', () => exitPaperPosition(order.id, exitButton));
-    actions.append(exitButton);
+    actions.append(partialButton, exitButton);
   }
   header.append(instrument, actions);
 
   const metrics = document.createElement('div');
   metrics.className = 'order-metrics';
   const isOpen = order.status === 'OPEN';
+  const hasStopLoss = order.stopLossPrice !== null && order.stopLossPrice !== undefined && Number.isFinite(Number(order.stopLossPrice));
+  const hasProfitTarget = order.targetPrice !== null && order.targetPrice !== undefined && Number.isFinite(Number(order.targetPrice));
   const pnl = isOpen
-    ? (Number(order.lastPrice || order.entryPrice) - Number(order.entryPrice)) * Number(order.quantity)
+    ? Number(order.realizedPnl || 0) + (Number(order.lastPrice || order.entryPrice) - Number(order.entryPrice)) * Number(order.quantity)
     : Number(order.realizedPnl || 0);
   metrics.append(
     createOrderMetric('Quantity', `${formatNumber(order.quantity, 0)} units · ${formatNumber(order.lots, 0)} lot${Number(order.lots) === 1 ? '' : 's'}`),
     createOrderMetric('Entry price', `₹${formatNumber(order.entryPrice)}`),
     createOrderMetric(isOpen ? 'LTP' : 'Exit price', `₹${formatNumber(isOpen ? order.lastPrice || order.entryPrice : order.exitPrice)}`),
-    createOrderMetric('Stop loss', `₹${formatNumber(order.stopLossPrice)}`),
-    createOrderMetric('Profit target', `₹${formatNumber(order.targetPrice)}`),
+    createOrderMetric('Stop loss', hasStopLoss ? `₹${formatNumber(order.stopLossPrice)}` : 'None'),
+    createOrderMetric('Profit target', hasProfitTarget ? `₹${formatNumber(order.targetPrice)}` : 'None'),
     createOrderMetric(isOpen ? 'Unrealized P&L' : 'Realized P&L', `${pnl >= 0 ? '+' : '−'}₹${formatNumber(Math.abs(pnl))}`, pnl >= 0 ? 'pnl-positive' : 'pnl-negative'),
   );
   card.append(header, metrics);
+  if (isOpen) {
+    const triggerActions = document.createElement('div');
+    triggerActions.className = 'order-trigger-actions';
+    const removeProfitButton = document.createElement('button');
+    removeProfitButton.type = 'button';
+    removeProfitButton.className = 'button order-trigger-button';
+    removeProfitButton.textContent = 'Remove Profit';
+    removeProfitButton.disabled = !hasProfitTarget;
+    removeProfitButton.addEventListener('click', () => removePaperOrderTrigger(order.id, 'profit'));
+    const addProfitButton = document.createElement('button');
+    addProfitButton.type = 'button';
+    addProfitButton.className = 'button order-trigger-button';
+    addProfitButton.textContent = 'Add Profit';
+    addProfitButton.disabled = hasProfitTarget;
+    addProfitButton.addEventListener('click', () => addPaperOrderTrigger(order.id, 'profit'));
+    const removeStopButton = document.createElement('button');
+    removeStopButton.type = 'button';
+    removeStopButton.className = 'button order-trigger-button';
+    removeStopButton.textContent = 'Remove SL';
+    removeStopButton.disabled = !hasStopLoss;
+    removeStopButton.addEventListener('click', () => removePaperOrderTrigger(order.id, 'stopLoss'));
+    const addStopButton = document.createElement('button');
+    addStopButton.type = 'button';
+    addStopButton.className = 'button order-trigger-button';
+    addStopButton.textContent = 'Add SL';
+    addStopButton.disabled = hasStopLoss;
+    addStopButton.addEventListener('click', () => addPaperOrderTrigger(order.id, 'stopLoss'));
+    triggerActions.append(removeStopButton, addStopButton, removeProfitButton, addProfitButton);
+    card.append(triggerActions);
+  }
   return card;
+}
+
+function renderCompletedTradesTable(target, orders) {
+  const table = document.createElement('table');
+  table.className = 'completed-trades-table';
+  table.setAttribute('aria-label', 'Completed paper trades');
+  const headers = ['Instrument', 'Order ID', 'Side', 'Realized P&L', 'Type', 'Closed at', 'Status', 'Quantity', 'Entry price', 'Exit price'];
+  const thead = document.createElement('thead');
+  const headerRow = document.createElement('tr');
+  headers.forEach((heading) => {
+    const cell = document.createElement('th');
+    cell.scope = 'col';
+    cell.textContent = heading;
+    headerRow.append(cell);
+  });
+  thead.append(headerRow);
+  const tbody = document.createElement('tbody');
+  for (const order of orders) {
+    const row = document.createElement('tr');
+    const closedAt = new Date(order.closedAt || order.createdAt);
+    const statusText = order.status === 'TARGET' ? 'TARGET HIT'
+      : order.status === 'STOP_LOSS' ? 'STOP LOSS'
+        : order.exitReason === 'MANUAL' ? 'MANUAL EXIT' : order.status;
+    const pnl = Number(order.realizedPnl || 0);
+    const values = [
+      order.symbol || '—',
+      order.id || '—',
+      order.side || 'BUY',
+      `${pnl >= 0 ? '+' : '−'}₹${formatNumber(Math.abs(pnl))}`,
+      order.orderType || 'MARKET',
+      Number.isNaN(closedAt.getTime()) ? '—' : closedAt.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }),
+      statusText,
+      `${formatNumber(order.quantity, 0)} units · ${formatNumber(order.lots, 0)} lot${Number(order.lots) === 1 ? '' : 's'}`,
+      `₹${formatNumber(order.entryPrice)}`,
+      `₹${formatNumber(order.exitPrice)}`,
+    ];
+    values.forEach((value, index) => {
+      const cell = document.createElement('td');
+      cell.textContent = value;
+      if (index === 5) {
+        const status = document.createElement('span');
+        status.className = 'order-status status-closed';
+        status.textContent = value;
+        cell.replaceChildren(status);
+      }
+      if (index === 3) cell.classList.add(pnl >= 0 ? 'pnl-positive' : 'pnl-negative');
+      row.append(cell);
+    });
+    tbody.append(row);
+  }
+  table.append(thead, tbody);
+  target.replaceChildren(table);
+}
+
+function removePaperOrderTrigger(orderId, trigger) {
+  const orders = readPaperOrders();
+  const order = orders.find((item) => item.id === orderId && item.status === 'OPEN');
+  if (!order) return;
+  if (trigger === 'profit') {
+    if (order.targetPrice === null || order.targetPrice === undefined) return;
+    order.lastProfitTargetPrice = Number(order.targetPrice);
+    order.targetPrice = null;
+  } else {
+    if (order.stopLossPrice === null || order.stopLossPrice === undefined) return;
+    order.lastStopLossPrice = Number(order.stopLossPrice);
+    order.stopLossPrice = null;
+    order.stopLossEnabled = false;
+  }
+  savePaperOrders(orders);
+  renderPaperOrders();
+  showNotice(trigger === 'profit' ? 'Profit target removed from this paper position.' : 'Stop loss removed from this paper position.');
+}
+
+function addPaperOrderTrigger(orderId, trigger) {
+  const orders = readPaperOrders();
+  const order = orders.find((item) => item.id === orderId && item.status === 'OPEN');
+  if (!order) return;
+  const isProfit = trigger === 'profit';
+  const currentValue = isProfit ? order.targetPrice : order.stopLossPrice;
+  if (currentValue !== null && currentValue !== undefined) return;
+  let settings = {};
+  try { settings = JSON.parse(localStorage.getItem(settingsStorageKey) || '{}') || {}; } catch { /* Show the settings prompt below. */ }
+  const points = Number(isProfit ? settings.profit : settings.stopLoss);
+  if (!Number.isFinite(points) || points <= 0) {
+    showNotice(`Set a valid default ${isProfit ? 'profit target' : 'stop loss'} in Trading Settings first.`);
+    return;
+  }
+  const price = Number(order.entryPrice) + (isProfit ? points : -points);
+  if (!Number.isFinite(price) || price <= 0) {
+    showNotice('The saved point setting produces an invalid trigger price for this order.');
+    return;
+  }
+  if (isProfit) order.targetPrice = price;
+  else {
+    order.stopLossPrice = price;
+    order.stopLossEnabled = true;
+  }
+  savePaperOrders(orders);
+  renderPaperOrders();
+  showNotice(`${isProfit ? 'Profit target' : 'Stop loss'} added at ₹${formatNumber(price)} using your saved ${isProfit ? 'profit' : 'stop loss'} points.`);
 }
 
 function renderPaperOrders() {
   const orders = readPaperOrders().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   const active = orders.filter((order) => order.status === 'OPEN');
   const completed = orders.filter((order) => order.status !== 'OPEN');
+  let capital = null;
+  try {
+    const settings = JSON.parse(localStorage.getItem(settingsStorageKey) || 'null');
+    if (Number.isFinite(Number(settings?.capital))) capital = Number(settings.capital);
+  } catch { /* Display unavailable capital as a dash. */ }
+  const capitalUsed = active.reduce((sum, order) => sum + Number(order.entryPrice) * Number(order.quantity), 0);
+  const summaryPnl = orders.reduce((sum, order) => {
+    if (order.status === 'OPEN') return sum + Number(order.realizedPnl || 0) + (Number(order.lastPrice || order.entryPrice) - Number(order.entryPrice)) * Number(order.quantity);
+    return sum + Number(order.realizedPnl || 0);
+  }, 0);
+  const setCapitalValue = (id, value) => { document.querySelector(id).textContent = value; };
+  setCapitalValue('#paper-total-capital', capital === null ? '—' : `₹${formatNumber(capital)}`);
+  setCapitalValue('#paper-capital-used', `₹${formatNumber(capitalUsed)}`);
+  setCapitalValue('#paper-capital-remaining', capital === null ? '—' : `₹${formatNumber(capital - capitalUsed)}`);
+  const runningPnl = document.querySelector('#paper-running-pnl');
+  runningPnl.textContent = `${summaryPnl >= 0 ? '+' : '−'}₹${formatNumber(Math.abs(summaryPnl))}`;
+  runningPnl.classList.toggle('pnl-positive', summaryPnl >= 0);
+  runningPnl.classList.toggle('pnl-negative', summaryPnl < 0);
   document.querySelector('#orders-summary').textContent = `${active.length} open · ${completed.length} completed`;
   const totalPnl = orders.reduce((sum, order) => {
-    if (order.status === 'OPEN') {
-      return sum + (Number(order.lastPrice || order.entryPrice) - Number(order.entryPrice)) * Number(order.quantity);
-    }
+    if (order.status === 'OPEN') return sum + Number(order.realizedPnl || 0) + (Number(order.lastPrice || order.entryPrice) - Number(order.entryPrice)) * Number(order.quantity);
     return sum + Number(order.realizedPnl || 0);
   }, 0);
   const totalPnlLabel = document.querySelector('#orders-total-pnl');
@@ -995,7 +1265,7 @@ function renderPaperOrders() {
   else showNoOrders(openList, 'No active paper orders. Buy a CE or PE contract from the chart to create one.');
   const completedGroup = document.querySelector('#completed-orders-group');
   completedGroup.hidden = completed.length === 0;
-  if (completed.length) completedList.replaceChildren(...completed.slice(0, 25).map(createOrderCard));
+  if (completed.length) renderCompletedTradesTable(completedList, completed.slice(0, 25));
   else completedList.replaceChildren();
 }
 
@@ -1019,14 +1289,15 @@ async function exitPaperPosition(orderId, button) {
     order.status = 'EXITED';
     order.exitPrice = exitPrice;
     order.lastPrice = exitPrice;
-    order.realizedPnl = (exitPrice - Number(order.entryPrice)) * Number(order.quantity);
+    const exitPnl = (exitPrice - Number(order.entryPrice)) * Number(order.quantity);
+    order.realizedPnl = Number(order.realizedPnl || 0) + exitPnl;
     order.closedAt = new Date().toISOString();
     order.exitReason = 'MANUAL';
     savePaperOrders(orders);
-    addRealizedPnlToCapital(order.realizedPnl);
+    addRealizedPnlToCapital(exitPnl);
     renderPaperOrders();
-    const result = order.realizedPnl >= 0 ? 'profit' : 'loss';
-    showNotice(`Paper position exited at ₹${formatNumber(exitPrice)} · ${result} ₹${formatNumber(Math.abs(order.realizedPnl))}.`);
+    const result = exitPnl >= 0 ? 'profit' : 'loss';
+    showNotice(`Paper position exited at ₹${formatNumber(exitPrice)} · ${result} ₹${formatNumber(Math.abs(exitPnl))}.`);
   } catch (error) {
     button.disabled = false;
     button.textContent = 'Exit position';
@@ -1034,12 +1305,56 @@ async function exitPaperPosition(orderId, button) {
   }
 }
 
-async function buyPaperOption(kind) {
-  const button = document.querySelector(`[data-paper-buy="${kind}"]`);
+async function partialExitPaperPosition(orderId, button) {
+  const orders = readPaperOrders();
+  const order = orders.find((item) => item.id === orderId && item.status === 'OPEN');
+  if (!order) return;
+  const lotsInput = window.prompt(`How many lots should be exited? Enter 1 to ${order.lots}.`, '1');
+  if (lotsInput === null) return;
+  const lotsToExit = Number(lotsInput);
+  if (!Number.isInteger(lotsToExit) || lotsToExit < 1 || lotsToExit > Number(order.lots)) {
+    showNotice(`Enter a whole number of lots from 1 to ${order.lots}.`);
+    return;
+  }
+  button.disabled = true;
+  button.textContent = 'Exiting…';
+  try {
+    const payload = await fetchApi(`/api/market/quote?${new URLSearchParams({ symbol: order.symbol })}`);
+    const exitPrice = quotePrice(payload, order.symbol);
+    const lotSize = Number(order.lotSize) || Math.round(Number(order.quantity) / Number(order.lots));
+    const exitQuantity = lotsToExit * lotSize;
+    const exitPnl = (exitPrice - Number(order.entryPrice)) * exitQuantity;
+    order.quantity = Number(order.quantity) - exitQuantity;
+    order.lots = Number(order.lots) - lotsToExit;
+    order.lastPrice = exitPrice;
+    order.realizedPnl = Number(order.realizedPnl || 0) + exitPnl;
+    order.lastPartialExitAt = new Date().toISOString();
+    order.lastPartialExitPrice = exitPrice;
+    if (order.lots === 0) {
+      order.status = 'EXITED';
+      order.exitPrice = exitPrice;
+      order.closedAt = order.lastPartialExitAt;
+      order.exitReason = 'MANUAL';
+    }
+    savePaperOrders(orders);
+    addRealizedPnlToCapital(exitPnl);
+    renderPaperOrders();
+    showNotice(`${lotsToExit} lot${lotsToExit === 1 ? '' : 's'} exited at ₹${formatNumber(exitPrice)} · ${exitPnl >= 0 ? 'profit' : 'loss'} ₹${formatNumber(Math.abs(exitPnl))}.`);
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = 'Partial Exit';
+    showNotice(error.message || 'Could not partially exit the paper position.');
+  }
+}
+
+async function buyPaperOption(kind, withStopLoss = true) {
+  const button = withStopLoss
+    ? document.querySelector(`[data-paper-buy="${kind}"]`)
+    : document.querySelector(`[data-paper-buy-without-sl="${kind}"]`);
   const settings = (() => {
     try { return JSON.parse(localStorage.getItem(settingsStorageKey) || 'null'); } catch { return null; }
   })();
-  if (!settings || !settings.capital || !settings.lots || !settings.profit || !settings.stopLoss) {
+  if (!settings || !settings.capital || !settings.lots || !settings.profit || (withStopLoss && !settings.stopLoss)) {
     showAppView('settings');
     showNotice('Save your trading settings before placing a paper order.');
     return;
@@ -1052,8 +1367,8 @@ async function buyPaperOption(kind) {
   const capital = Number(settings.capital);
   const lots = Number(settings.lots);
   const profitPoints = Number(settings.profit);
-  const stopLossPoints = Number(settings.stopLoss);
-  if (!(capital > 0) || !Number.isInteger(lots) || lots < 1 || !(profitPoints > 0) || !(stopLossPoints > 0)) {
+  const stopLossPoints = withStopLoss ? Number(settings.stopLoss) : null;
+  if (!(capital > 0) || !Number.isInteger(lots) || lots < 1 || !(profitPoints > 0) || (withStopLoss && !(stopLossPoints > 0))) {
     showAppView('settings');
     showNotice('Check and save valid trading settings before placing an order.');
     return;
@@ -1087,19 +1402,20 @@ async function buyPaperOption(kind) {
       quantity,
       entryPrice,
       lastPrice: entryPrice,
-      stopLossPrice: entryPrice - stopLossPoints,
+      stopLossPrice: withStopLoss ? entryPrice - stopLossPoints : null,
       targetPrice: entryPrice + profitPoints,
+      stopLossEnabled: withStopLoss,
       createdAt: now.toISOString(),
     };
     orders.unshift(order);
     savePaperOrders(orders);
     renderPaperOrders();
-    showNotice(`Paper buy filled: ${symbol} · ${quantity} units at ₹${formatNumber(entryPrice)}.`);
+    showNotice(`Paper buy${withStopLoss ? '' : ' without stop loss'} filled: ${symbol} · ${quantity} units at ₹${formatNumber(entryPrice)}.`);
   } catch (error) {
     showNotice(error.message);
   } finally {
     button.disabled = false;
-    button.textContent = 'Buy';
+    button.textContent = withStopLoss ? 'Buy' : 'Buy without SL';
   }
 }
 
@@ -1122,18 +1438,20 @@ async function refreshPaperOrders() {
         const payload = await fetchApi(`/api/market/quote?${new URLSearchParams({ symbol: order.symbol })}`);
         const price = quotePrice(payload, order.symbol);
         order.lastPrice = price;
-        if (price <= Number(order.stopLossPrice)) {
+        if (order.stopLossPrice !== null && order.stopLossPrice !== undefined && price <= Number(order.stopLossPrice)) {
           order.status = 'STOP_LOSS';
           order.exitPrice = price;
-          order.realizedPnl = (price - Number(order.entryPrice)) * Number(order.quantity);
-          capitalAdjustment += order.realizedPnl;
+          const finalPnl = (price - Number(order.entryPrice)) * Number(order.quantity);
+          order.realizedPnl = Number(order.realizedPnl || 0) + finalPnl;
+          capitalAdjustment += finalPnl;
           order.closedAt = new Date().toISOString();
           completedNow.push(`${order.symbol} reached stop loss.`);
-        } else if (price >= Number(order.targetPrice)) {
+        } else if (order.targetPrice !== null && order.targetPrice !== undefined && price >= Number(order.targetPrice)) {
           order.status = 'TARGET';
           order.exitPrice = Number(order.targetPrice);
-          order.realizedPnl = (Number(order.targetPrice) - Number(order.entryPrice)) * Number(order.quantity);
-          capitalAdjustment += order.realizedPnl;
+          const finalPnl = (Number(order.targetPrice) - Number(order.entryPrice)) * Number(order.quantity);
+          order.realizedPnl = Number(order.realizedPnl || 0) + finalPnl;
+          capitalAdjustment += finalPnl;
           order.closedAt = new Date().toISOString();
           completedNow.push(`${order.symbol} reached the profit target.`);
         }
@@ -1172,20 +1490,58 @@ themeToggle.addEventListener('click', () => {
   try { localStorage.setItem('options-desk-theme', nextTheme); } catch { /* Theme still applies for this page view. */ }
 });
 
-function renderNewsRows(items) {
-  const tbody = document.querySelector('#news-rows');
-  if (!Array.isArray(items) || !items.length) {
-    tbody.replaceChildren();
-    const row = tbody.insertRow();
-    const cell = row.insertCell();
-    cell.colSpan = 4;
-    cell.className = 'news-status';
-    cell.textContent = 'No relevant headlines were returned. Try Refresh later.';
+function verdictForNews(items) {
+  const counts = { Upside: 0, Downside: 0, Mixed: 0 };
+  for (const item of items) {
+    if (item.direction === 'Upside') counts.Upside += 1;
+    else if (item.direction === 'Downside') counts.Downside += 1;
+    else counts.Mixed += 1;
+  }
+  const directional = counts.Upside + counts.Downside;
+  const balance = directional ? (counts.Upside - counts.Downside) / directional : 0;
+  const label = directional < 2 || Math.abs(balance) < 0.16
+    ? 'Mixed / unclear news bias'
+    : balance > 0 ? 'Positive news bias' : 'Negative news bias';
+  const color = label.startsWith('Positive') ? 'impact-up' : label.startsWith('Negative') ? 'impact-down' : 'impact-mixed';
+  const detail = `${counts.Upside} positive · ${counts.Downside} negative · ${counts.Mixed} mixed headlines`;
+  return { label, color, detail };
+}
+
+function renderVerdict(items, error = '') {
+  const underlying = currentUnderlying === 'BANKNIFTY' ? 'BANK NIFTY' : 'NIFTY';
+  const filtered = (Array.isArray(items) ? items : []).filter((item) =>
+    !Array.isArray(item.indices) || item.indices.includes(underlying) || item.indices.includes('BANK NIFTY') && underlying === 'BANK NIFTY',
+  );
+  document.querySelector('#verdict-subtitle').textContent = `Headline sentiment for ${underlying}. Use the charts and your own risk rules alongside this view.`;
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const todayItems = filtered.filter((item) => {
+    const published = new Date(item.publishedAt).getTime();
+    return Number.isFinite(published) && published >= todayStart && published <= now.getTime();
+  });
+  const recentItems = filtered.filter((item) => {
+    const published = new Date(item.publishedAt).getTime();
+    return Number.isFinite(published) && published >= now.getTime() - 7 * 24 * 60 * 60 * 1000 && published <= now.getTime();
+  });
+  const today = verdictForNews(todayItems);
+  const nextDays = verdictForNews(recentItems);
+  document.querySelector('#verdict-today-title').textContent = todayItems.length ? today.label : error ? 'News unavailable' : 'No clear signal';
+  document.querySelector('#verdict-today-detail').textContent = todayItems.length ? `${today.detail} since midnight. Headline tone only.` : error || 'No relevant headlines published today.';
+  document.querySelector('#verdict-days-title').textContent = recentItems.length ? nextDays.label : error ? 'News unavailable' : 'No clear signal';
+  document.querySelector('#verdict-days-detail').textContent = recentItems.length ? `${nextDays.detail} over the past 7 days. Recent themes may persist, but new events can change the picture.` : error || 'Not enough recent headlines to form a broad read.';
+  document.querySelector('#verdict-today-title').className = `verdict-heading ${today.color}`;
+  document.querySelector('#verdict-days-title').className = `verdict-heading ${nextDays.color}`;
+  const list = document.querySelector('#verdict-drivers-list');
+  const drivers = [...filtered].sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt)).slice(0, 3);
+  if (!drivers.length) {
+    const empty = document.createElement('li');
+    empty.className = 'news-status';
+    empty.textContent = error || 'No relevant headlines were returned. Try Refresh later.';
+    list.replaceChildren(empty);
     return;
   }
-  tbody.replaceChildren(...items.map((item) => {
-    const row = document.createElement('tr');
-    const headlineCell = row.insertCell();
+  list.replaceChildren(...drivers.map((item) => {
+    const row = document.createElement('li');
     const link = document.createElement('a');
     link.className = 'news-headline';
     link.textContent = item.title || 'Untitled headline';
@@ -1197,28 +1553,12 @@ function renderNewsRows(items) {
         link.rel = 'noopener noreferrer';
       }
     } catch { /* Keep invalid feed URLs as plain headline text. */ }
-    headlineCell.append(link);
-    const source = document.createElement('span');
-    source.className = 'news-source';
-    source.textContent = item.source || 'News source';
-    headlineCell.append(source);
-
-    const dateCell = row.insertCell();
+    const meta = document.createElement('span');
+    meta.className = 'news-source';
     const published = new Date(item.publishedAt);
-    dateCell.textContent = Number.isNaN(published.getTime())
-      ? '—'
-      : new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }).format(published);
-    dateCell.className = 'news-date';
-
-    const affectedCell = row.insertCell();
-    affectedCell.textContent = (Array.isArray(item.indices) ? item.indices : []).join(' · ') || 'NIFTY · BANK NIFTY';
-
-    const impactCell = row.insertCell();
-    const impact = document.createElement('span');
-    const direction = ['Upside', 'Downside'].includes(item.direction) ? item.direction : 'Mixed / unclear';
-    impact.className = `news-impact ${direction === 'Upside' ? 'impact-up' : direction === 'Downside' ? 'impact-down' : 'impact-mixed'}`;
-    impact.textContent = direction;
-    impactCell.append(impact);
+    const date = Number.isNaN(published.getTime()) ? '' : new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }).format(published);
+    meta.textContent = [item.source || 'News source', date].filter(Boolean).join(' · ');
+    row.append(link, meta);
     return row;
   }));
 }
@@ -1230,16 +1570,14 @@ async function loadLatestNews(force = false) {
   const updated = document.querySelector('#news-updated');
   refresh.disabled = true;
   refresh.textContent = 'Loading…';
-  updated.textContent = 'Loading latest headlines…';
+  updated.textContent = 'Summarizing recent headlines…';
   try {
     const result = await fetchApi(`/api/news${force ? '?refresh=1' : ''}`);
-    if (result.error) throw new Error(result.error);
-    renderNewsRows(result.items || []);
+    renderVerdict(result.items || [], result.error || '');
     const stamp = result.fetchedAt ? new Date(result.fetchedAt) : new Date();
-    updated.textContent = `Updated ${new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }).format(stamp)} IST · ${result.items?.length || 0} headlines`;
+    updated.textContent = `Updated ${new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }).format(stamp)} IST · Based on ${result.items?.length || 0} recent headlines`;
   } catch (error) {
-    renderNewsRows([]);
-    document.querySelector('#news-rows').querySelector('.news-status').textContent = `Could not load news: ${error.message}`;
+    renderVerdict([], `Could not load news: ${error.message}`);
     updated.textContent = 'Check your internet connection and try Refresh.';
   } finally {
     refresh.disabled = false;
@@ -1273,6 +1611,9 @@ document.querySelector('#open-orders').addEventListener('click', () => {
 document.querySelector('#refresh-orders').addEventListener('click', refreshPaperOrders);
 document.querySelectorAll('[data-paper-buy]').forEach((button) => {
   button.addEventListener('click', () => buyPaperOption(button.dataset.paperBuy));
+});
+document.querySelectorAll('[data-paper-buy-without-sl]').forEach((button) => {
+  button.addEventListener('click', () => buyPaperOption(button.dataset.paperBuyWithoutSl, false));
 });
 renderPaperOrders();
 window.setInterval(refreshPaperOrders, 15000);
@@ -1339,7 +1680,7 @@ function updateIndicatorLegend(kind) {
     const legend = document.querySelector(`[data-ema-legend="${kind}-${index}"]`);
     if (!legend) continue;
     legend.style.display = drawState.emaVisible && ema.enabled ? '' : 'none';
-    legend.querySelector('.ema-legend-name').textContent = `EMA ${ema.period}`;
+    legend.querySelector('.ema-legend-name').textContent = `EMA ${ema.period} · ${emaTimeframeLabel(ema.timeframe || 'chart', series[kind].interval)}`;
     const swatch = legend.querySelector('.ema-swatch');
     swatch.style.backgroundColor = ema.color;
     swatch.style.boxShadow = index === 2 && ema.color.toLowerCase() === '#000000'
@@ -1402,11 +1743,20 @@ function createIndicatorDialog(kind) {
     period.step = '1';
     period.dataset.emaPeriod = String(index);
     period.setAttribute('aria-label', `EMA ${index + 1} period`);
+    const timeframe = document.createElement('select');
+    timeframe.dataset.emaTimeframe = String(index);
+    timeframe.setAttribute('aria-label', `EMA ${index + 1} timeframe`);
+    emaTimeframeOptions.forEach(([value, label]) => {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      timeframe.append(option);
+    });
     const color = document.createElement('input');
     color.type = 'color';
     color.dataset.emaColor = String(index);
     color.setAttribute('aria-label', `EMA ${index + 1} color`);
-    row.append(enabled, name, period, color);
+    row.append(enabled, name, period, timeframe, color);
     rows.append(row);
   }
   panel.append(rows);
@@ -1437,6 +1787,7 @@ function createIndicatorDialog(kind) {
         period: value,
         color: panel.querySelector(`[data-ema-color="${index}"]`).value,
         enabled: panel.querySelector(`[data-ema-enabled="${index}"]`).checked,
+        timeframe: panel.querySelector(`[data-ema-timeframe="${index}"]`).value,
       });
     }
     chartDrawState[kind].emaVisible = show.checked;
@@ -1468,6 +1819,7 @@ function openIndicatorSettings(kind, button) {
     dialog.querySelector(`[data-ema-enabled="${index}"]`).checked = ema.enabled;
     dialog.querySelector(`[data-ema-period="${index}"]`).value = String(ema.period);
     dialog.querySelector(`[data-ema-color="${index}"]`).value = ema.color;
+    dialog.querySelector(`[data-ema-timeframe="${index}"]`).value = ema.timeframe || 'chart';
   }
   button.setAttribute('aria-expanded', 'true');
   dialog.showModal();
@@ -1534,6 +1886,56 @@ function chartPointFromEvent(kind, svg, event) {
   return { timestamp: data.candles[globalIndex][0], price };
 }
 
+function trendlineHitTest(kind, svg, event) {
+  const data = chartData[kind];
+  const view = chartViews[kind];
+  if (!data || !view) return null;
+  const drawState = chartDrawState[kind];
+  const bounds = svg.getBoundingClientRect();
+  const pointer = {
+    x: ((event.clientX - bounds.left) / Math.max(bounds.width, 1)) * 760,
+    y: ((event.clientY - bounds.top) / Math.max(bounds.height, 1)) * 180,
+  };
+  const left = 4;
+  const right = 675;
+  const top = 6;
+  const bottom = 174;
+  const startIndex = view.end - view.window;
+  const visible = data.candles.slice(Math.max(0, startIndex), Math.min(view.end, data.candles.length));
+  if (!visible.length) return null;
+  const low = Math.min(...visible.map((row) => row[3]));
+  const high = Math.max(...visible.map((row) => row[2]));
+  const mid = (low + high) / 2 + (view.priceOffset || 0);
+  const span = Math.max(high - low, Math.abs(high) * 0.0001, 0.01) * (view.priceScale || 1);
+  const y = (price) => bottom - ((price - (mid - span / 2)) / span) * (bottom - top);
+  const gap = (right - left) / view.window;
+  let nearest = null;
+  let nearestDistance = 9;
+  const matches = (line) => line.symbol === data.symbol && (kind === 'spot-intraday' || line.interval === data.interval);
+  for (const [index, line] of drawState.trendlines.entries()) {
+    if (!matches(line)) continue;
+    const first = nearestCandleIndex(data.candles, line.start.timestamp);
+    const last = nearestCandleIndex(data.candles, line.end.timestamp);
+    const firstVisible = first - startIndex;
+    const lastVisible = last - startIndex;
+    const a = { x: left + (firstVisible + 0.5) * gap, y: y(line.start.price) };
+    const b = { x: left + (lastVisible + 0.5) * gap, y: y(line.end.price) };
+    const end = line.extendRight !== false && Math.abs(b.x - a.x) > 0.01
+      ? { x: Math.max(b.x, right), y: a.y + ((b.y - a.y) / (b.x - a.x)) * (Math.max(b.x, right) - a.x) }
+      : b;
+    const dx = end.x - a.x;
+    const dy = end.y - a.y;
+    const lengthSquared = dx * dx + dy * dy;
+    const projection = lengthSquared ? Math.max(0, Math.min(1, ((pointer.x - a.x) * dx + (pointer.y - a.y) * dy) / lengthSquared)) : 0;
+    const distance = Math.hypot(pointer.x - (a.x + projection * dx), pointer.y - (a.y + projection * dy));
+    if (distance < nearestDistance && pointer.x >= left && pointer.x <= right && pointer.y >= top && pointer.y <= bottom) {
+      nearest = { index, line, distance };
+      nearestDistance = distance;
+    }
+  }
+  return nearest;
+}
+
 document.querySelectorAll('.candlestick-chart').forEach((svg) => {
   const kind = svg.id.replace('chart-', '');
   let dragStart = null;
@@ -1551,13 +1953,25 @@ document.querySelectorAll('.candlestick-chart').forEach((svg) => {
       dragStart = { mode: 'trendline', start, x: event.clientX, y: event.clientY };
       chartDrawState[kind].preview = { symbol: chartData[kind].symbol, interval: chartData[kind].interval, start, end: start, preview: true };
     } else {
-      dragStart = { mode: 'pan', x: event.clientX, y: event.clientY, end: view.end, priceOffset: view.priceOffset || 0, priceSpan: view.priceSpan || 1 };
+      const hit = trendlineHitTest(kind, svg, event);
+      if (hit) {
+        const start = chartPointFromEvent(kind, svg, event);
+        dragStart = {
+          mode: 'trendline-move', lineIndex: hit.index, start,
+          originalStart: { ...hit.line.start }, originalEnd: { ...hit.line.end },
+        };
+      } else {
+        dragStart = { mode: 'pan', x: event.clientX, y: event.clientY, end: view.end, priceOffset: view.priceOffset || 0, priceSpan: view.priceSpan || 1 };
+      }
     }
     svg.classList.add('is-dragging');
     svg.setPointerCapture(event.pointerId);
   });
   svg.addEventListener('pointermove', (event) => {
-    if (!dragStart) return;
+    if (!dragStart) {
+      svg.classList.toggle('trendline-hover', !chartDrawState[kind].drawTrendline && Boolean(trendlineHitTest(kind, svg, event)));
+      return;
+    }
     const view = chartViews[kind];
     if (!view) return;
     if (dragStart.mode === 'price-scale') {
@@ -1566,6 +1980,15 @@ document.querySelectorAll('.candlestick-chart').forEach((svg) => {
     } else if (dragStart.mode === 'trendline') {
       const end = chartPointFromEvent(kind, svg, event);
       if (end && chartDrawState[kind].preview) chartDrawState[kind].preview.end = end;
+    } else if (dragStart.mode === 'trendline-move') {
+      const point = chartPointFromEvent(kind, svg, event);
+      const line = chartDrawState[kind].trendlines[dragStart.lineIndex];
+      if (point && line) {
+        const timeDelta = point.timestamp - dragStart.start.timestamp;
+        const priceDelta = point.price - dragStart.start.price;
+        line.start = { timestamp: dragStart.originalStart.timestamp + timeDelta, price: dragStart.originalStart.price + priceDelta };
+        line.end = { timestamp: dragStart.originalEnd.timestamp + timeDelta, price: dragStart.originalEnd.price + priceDelta };
+      }
     } else {
       const moved = Math.round(((dragStart.x - event.clientX) / Math.max(svg.clientWidth, 1)) * view.window);
       view.end = Math.max(view.window, Math.min(view.total + view.window - 1, dragStart.end + moved));
@@ -1595,9 +2018,17 @@ document.querySelectorAll('.candlestick-chart').forEach((svg) => {
       drawState.drawTrendline = false;
       updateChartTools(kind);
       redrawChart(kind);
+    } else if (dragStart?.mode === 'trendline-move') {
+      const line = chartDrawState[kind].trendlines[dragStart.lineIndex];
+      if (cancelled && line) {
+        line.start = dragStart.originalStart;
+        line.end = dragStart.originalEnd;
+      } else if (line) showNotice('Trend line moved. Save the workspace to keep this change.');
+      redrawChart(kind);
     }
     dragStart = null;
     svg.classList.remove('is-dragging');
+    svg.classList.remove('trendline-hover');
   };
   svg.addEventListener('pointerup', (event) => finishDrag(event));
   svg.addEventListener('pointercancel', (event) => finishDrag(event, true));
