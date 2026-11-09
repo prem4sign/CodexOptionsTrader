@@ -199,11 +199,13 @@ def _market_request(handler, route: str, query: dict[str, list[str]], settings: 
         if resolution in {"1D", "1W", "1M"}:
             ist = timezone(timedelta(hours=5, minutes=30))
             now = datetime.now(ist)
+            alert_partial = query.get("retouch_alert", [""])[0] == "1" and resolution == "1D"
             close = now.replace(hour=15, minute=30, second=0, microsecond=0)
             if now < close:
                 close = (now - timedelta(days=1)).replace(hour=15, minute=30, second=0, microsecond=0)
-            range_to = int(close.timestamp())
-            range_from = int((close - timedelta(days=365 * 5)).timestamp())
+            range_to = int(now.timestamp()) if alert_partial else int(close.timestamp())
+            history_days = 500 if alert_partial else 365 * 5
+            range_from = int((now - timedelta(days=history_days)).timestamp()) if alert_partial else int((close - timedelta(days=history_days)).timestamp())
             candles: dict[int, list] = {}
             start = range_from
             while start < range_to:

@@ -355,11 +355,13 @@ class AppHandler(SimpleHTTPRequestHandler):
                 # offset so daily history also works on Windows without tzdata.
                 ist = timezone(timedelta(hours=5, minutes=30))
                 now = datetime.now(ist)
+                alert_partial = query.get("retouch_alert", [""])[0] == "1" and resolution == "1D"
                 market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
                 if now < market_close:
                     market_close = (now - timedelta(days=1)).replace(hour=15, minute=30, second=0, microsecond=0)
-                range_to = int(market_close.timestamp())
-                range_from = int((market_close - timedelta(days=365 * 5)).timestamp())
+                range_to = int(now.timestamp()) if alert_partial else int(market_close.timestamp())
+                history_days = 500 if alert_partial else 365 * 5
+                range_from = int((now - timedelta(days=history_days)).timestamp()) if alert_partial else int((market_close - timedelta(days=history_days)).timestamp())
                 candles_by_timestamp = {}
                 chunk_start = range_from
                 chunk_days = 365

@@ -64,7 +64,7 @@
               <div class="chart-title-row"><span class="chart-index spot-index">01</span><h2 class="spot-title">NIFTY 50 Spot</h2><span class="contract-pill spot-pill">INDEX</span></div>
               <p class="spot-subtitle">Spot price · historical OHLC</p>
             </div>
-            <label class="interval-control"><span>INTERVAL</span><select id="interval-spot-intraday" data-series="spot-intraday" aria-label="Spot chart interval"><option value="1">1m</option><option value="5">5m</option><option value="15">15m</option><option value="30">30m</option><option value="60" selected>1h</option><option value="1D">1D</option></select></label>
+            <label class="interval-control"><span>INTERVAL</span><select id="interval-spot-intraday" data-series="spot-intraday" aria-label="Spot chart interval"><option value="1">1m</option><option value="5" selected>5m</option><option value="15">15m</option><option value="30">30m</option><option value="60">1h</option><option value="1D">1D</option></select></label>
           </header>
           <div class="indicator-legend" aria-label="Exponential moving averages">
             <span class="ema-legend-item" data-ema-legend="spot-intraday-0"><i class="ema-swatch"></i><span class="ema-legend-name">EMA 50</span> <b id="ema-spot-intraday-0">—</b></span><span class="ema-legend-item" data-ema-legend="spot-intraday-1"><i class="ema-swatch"></i><span class="ema-legend-name">EMA 100</span> <b id="ema-spot-intraday-1">—</b></span><span class="ema-legend-item" data-ema-legend="spot-intraday-2"><i class="ema-swatch"></i><span class="ema-legend-name">EMA 200</span> <b id="ema-spot-intraday-2">—</b></span>
@@ -136,10 +136,11 @@
           <div class="settings-heading"><div><h2>Trade defaults</h2></div><span class="settings-note">Saved on this device</span></div>
           <form id="trading-settings" class="settings-form">
             <label class="setting-field" for="capital-input"><span>Total trading capital <b>₹</b></span><input id="capital-input" name="capital" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="Enter capital" required /></label>
-            <label class="setting-field" for="lots-input"><span>Default lots per trade</span><input id="lots-input" name="lots" type="number" min="1" step="1" inputmode="numeric" placeholder="Enter lots" required /></label>
+            <label class="setting-field" for="lots-input"><span>Default lots per trade</span><input id="lots-input" name="lots" type="text" inputmode="text" placeholder="Lots or % of available capital" required /></label>
             <label class="setting-field" for="profit-input"><span>Default profit points</span><input id="profit-input" name="profit" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="Enter points" required /></label>
             <label class="setting-field" for="stop-loss-input"><span>Default stop loss points</span><input id="stop-loss-input" name="stopLoss" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="Enter points" required /></label>
             <label class="setting-field" for="retouch-ema-input"><span>Plot re-touch on</span><select id="retouch-ema-input" name="retouchEmaPeriod"><option value="50">50 EMA</option><option value="100">100 EMA</option><option value="200" selected>200 EMA</option></select></label>
+            <label class="setting-field" for="retouch-timeframe-input"><span>Trigger retouch alert for time frame</span><select id="retouch-timeframe-input" name="retouchAlertInterval"><option value="1">1m</option><option value="5" selected>5m</option><option value="15">15m</option><option value="30">30m</option><option value="60">1h</option><option value="1D">1D</option></select></label>
             <div class="settings-actions"><span id="settings-status" role="status" aria-live="polite">Set your defaults for the trading workspace.</span><button class="button button-primary" type="submit">Save settings</button></div>
           </form>
         </section>

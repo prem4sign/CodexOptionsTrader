@@ -23,7 +23,7 @@ let newsLoading = false;
 const series = {
   call: { symbol: '', interval: '5' },
   put: { symbol: '', interval: '5' },
-  'spot-intraday': { symbol: UNDERLYINGS[currentUnderlying].symbol, interval: '60' },
+  'spot-intraday': { symbol: UNDERLYINGS[currentUnderlying].symbol, interval: '5' },
   'spot-daily': { symbol: UNDERLYINGS[currentUnderlying].symbol, interval: '1D' },
 };
 const chartData = {};
@@ -261,6 +261,21 @@ function calculateEma(values, period) {
   });
 }
 
+function uniqueCandlesByTimestamp(candles) {
+  const byTimestamp = new Map();
+  for (const candle of candles) byTimestamp.set(Number(candle[0]), candle);
+  return [...byTimestamp.values()].sort((a, b) => a[0] - b[0]);
+}
+
+function candleTouchesEma(candle, emaValue) {
+  return Number.isFinite(emaValue) && candle[3] <= emaValue && candle[2] >= emaValue;
+}
+
+function isRetouchStart(candles, emaValues, index) {
+  if (!candleTouchesEma(candles[index], emaValues[index])) return false;
+  return index === 0 || !candleTouchesEma(candles[index - 1], emaValues[index - 1]);
+}
+
 function formatEmaRetouchTime(timestamp, interval) {
   const date = new Date(timestamp * 1000);
   const isCalendarInterval = ['1D', '1W', '1M'].includes(interval);
@@ -277,6 +292,27 @@ function emaRetouchPeriod() {
   } catch {
     return 200;
   }
+}
+
+function retouchAlertInterval() {
+  try {
+    const settings = JSON.parse(localStorage.getItem(settingsStorageKey) || 'null');
+    const interval = String(settings?.retouchAlertInterval || '5');
+    return ['1', '5', '15', '30', '60', '1D'].includes(interval) ? interval : '5';
+  } catch {
+    return '5';
+  }
+}
+
+function retouchEventsForCandles(candles, period) {
+  if (!Array.isArray(candles) || candles.length < period) return [];
+  const uniqueCandles = uniqueCandlesByTimestamp(candles);
+  const emaValues = calculateEma(uniqueCandles.map((candle) => Number(candle[4])), period);
+  return uniqueCandles.flatMap((candle, index) => {
+    return isRetouchStart(uniqueCandles, emaValues, index)
+      ? [{ timestamp: Number(candle[0]), period }]
+      : [];
+  });
 }
 
 function getSpotRetouchEvents() {
@@ -297,7 +333,7 @@ function getSpotRetouchEvents() {
   for (let index = 0; index < spotData.candles.length; index += 1) {
     const candle = spotData.candles[index];
     const emaValue = emaValues[index];
-    if (Number.isFinite(emaValue) && candle[3] <= emaValue && candle[2] >= emaValue) {
+    if (isRetouchStart(spotData.candles, emaValues, index)) {
       events.push({ timestamp: candle[0], period });
     }
   }
@@ -310,6 +346,7 @@ let retouchChimeUnlocked = false;
 let retouchSoundContext = '';
 let previousSpotRetouches = new Set();
 let retouchPollInProgress = false;
+let lastDailyRetouchPollAt = 0;
 
 function unlockRetouchChime() {
   if (retouchChimeUnlocked) return;
@@ -330,14 +367,23 @@ function unlockRetouchChime() {
 document.addEventListener('pointerdown', unlockRetouchChime, { once: true });
 
 function playRetouchChime() {
-  retouchChime.currentTime = 0;
-  retouchChime.play().catch(() => {});
+  let remaining = 3;
+  const playNext = () => {
+    if (remaining <= 0) {
+      retouchChime.onended = null;
+      return;
+    }
+    remaining -= 1;
+    retouchChime.currentTime = 0;
+    retouchChime.onended = playNext;
+    retouchChime.play().catch(() => { retouchChime.onended = null; });
+  };
+  playNext();
 }
 
-function observeSpotRetouches(events, spotData) {
+function observeSpotRetouches(events, spotData, alertInterval = spotData.interval) {
   const period = emaRetouchPeriod();
-  const emaSettings = chartDrawState['spot-intraday'].emas.find((ema) => Number(ema.period) === period);
-  const context = `${spotData.symbol}|${spotData.interval}|${period}|${emaSettings?.timeframe || 'chart'}|${Boolean(emaSettings?.enabled)}`;
+  const context = `${spotData.symbol}|${alertInterval}|${period}`;
   const currentTimestamps = new Set(events.map((event) => event.timestamp));
   if (context !== retouchSoundContext) {
     retouchSoundContext = context;
@@ -345,8 +391,8 @@ function observeSpotRetouches(events, spotData) {
     return;
   }
   const lastTimestamp = spotData.candles[spotData.candles.length - 1]?.[0] || 0;
-  const barSeconds = ['1D', '1W', '1M'].includes(spotData.interval)
-    ? 86400 : Number(spotData.interval) * 60;
+  const barSeconds = ['1D', '1W', '1M'].includes(alertInterval)
+    ? 86400 : Number(alertInterval) * 60;
   const recentAfter = lastTimestamp - Math.max(1800, barSeconds * 2);
   const isNewRecentTouch = events.some((event) => (
     event.timestamp >= recentAfter && !previousSpotRetouches.has(event.timestamp)
@@ -361,20 +407,28 @@ async function refreshSpotCandlesForRetouch() {
   const state = chartDrawState[kind];
   const period = emaRetouchPeriod();
   const ema = state.emas.find((item) => Number(item.period) === period);
+  const alertInterval = retouchAlertInterval();
+  if (alertInterval === '1D' && Date.now() - lastDailyRetouchPollAt < 300000) return;
   if (retouchPollInProgress || document.visibilityState !== 'visible'
     || !document.querySelector('#connection-state .status-dot')?.classList.contains('connected')
-    || !data || !state.emaVisible || !ema?.enabled
-    || ['1D', '1W', '1M'].includes(data.interval)) return;
+    || !data || !state.emaVisible || !ema?.enabled) return;
 
   retouchPollInProgress = true;
-  const { symbol, interval } = data;
-  const requestId = seriesRequestIds[kind];
+  const { symbol } = data;
   try {
-    const query = new URLSearchParams({ symbol, resolution: interval, include_partial: '1' });
+    const query = new URLSearchParams({ symbol, resolution: alertInterval, include_partial: '1', retouch_alert: '1' });
     const payload = await fetchApi(`/api/market/history?${query}`);
-    if (seriesRequestIds[kind] !== requestId || series[kind].symbol !== symbol || series[kind].interval !== interval) return;
-    drawCandles(kind, payload, symbol, interval);
-    redrawOptionRetouchCharts();
+    if (alertInterval === '1D') lastDailyRetouchPollAt = Date.now();
+    if (series[kind].symbol !== symbol || retouchAlertInterval() !== alertInterval) return;
+    const candles = payload.candles || [];
+    const events = retouchEventsForCandles(candles, period);
+    observeSpotRetouches(events, { symbol, interval: alertInterval, candles }, alertInterval);
+    if (alertInterval === data.interval) {
+      if (series[kind].interval === alertInterval) {
+        drawCandles(kind, payload, symbol, alertInterval);
+        redrawOptionRetouchCharts();
+      }
+    }
   } catch {
     // Keep the last chart visible; the next poll can retry after a transient API error.
   } finally {
@@ -455,10 +509,10 @@ function nearestCandleIndex(candles, timestamp) {
 
 function drawCandles(kind, payload, symbol, interval) {
   const raw = payload.candles || payload.data?.candles || [];
-  const allCandles = raw
+  const allCandles = uniqueCandlesByTimestamp(raw
     .filter((row) => Array.isArray(row) && row.length >= 5 && row.slice(0, 5).every((value) => Number.isFinite(Number(value))))
     .map((row) => row.slice(0, 5).map(Number))
-    .sort((a, b) => a[0] - b[0]);
+  );
   if (!allCandles.length) throw new Error('No historical candles are available for this symbol and interval.');
   chartData[kind] = { payload, symbol, interval, candles: allCandles };
   const previousView = chartViews[kind];
@@ -615,13 +669,12 @@ function drawCandles(kind, payload, symbol, interval) {
   const retouchEma = emaValuesByPeriod.get(retouchPeriod);
   if (drawState.emaVisible && retouchEma?.enabled
     && kind === 'spot-intraday') {
-    observeSpotRetouches(getSpotRetouchEvents(), chartData[kind]);
     let markerNumber = 0;
     const visibleEnd = Math.min(view.end, allCandles.length);
     for (let candleIndex = firstDataIndex; candleIndex < visibleEnd; candleIndex += 1) {
       const candle = allCandles[candleIndex];
       const emaValue = retouchEma.allValues[candleIndex];
-      if (!Number.isFinite(emaValue) || candle[3] > emaValue || candle[2] < emaValue) continue;
+      if (!isRetouchStart(allCandles, retouchEma.allValues, candleIndex)) continue;
       const visibleSlot = candleIndex - startIndex;
       if (visibleSlot < 0 || visibleSlot >= view.window) continue;
       const x = left + (visibleSlot + 0.5) * gap;
@@ -917,6 +970,9 @@ async function loadMarketData() {
     refreshButton.disabled = false;
     document.querySelector('#underlying-select').disabled = false;
     busy = false;
+    if (document.querySelector('#connection-state .status-dot')?.classList.contains('connected')) {
+      window.setTimeout(refreshSpotCandlesForRetouch, 0);
+    }
   }
 }
 
@@ -1184,15 +1240,19 @@ const settingsFields = {
   profit: document.querySelector('#profit-input'),
   stopLoss: document.querySelector('#stop-loss-input'),
   retouchEmaPeriod: document.querySelector('#retouch-ema-input'),
+  retouchAlertInterval: document.querySelector('#retouch-timeframe-input'),
 };
 
 try {
   const savedSettings = JSON.parse(localStorage.getItem(settingsStorageKey) || 'null');
   if (savedSettings && typeof savedSettings === 'object') {
     for (const [key, field] of Object.entries(settingsFields)) {
-      if (savedSettings[key] !== undefined && Number.isFinite(Number(savedSettings[key]))) {
+      if (savedSettings[key] === undefined) continue;
+      if (key === 'lots') {
         field.value = String(savedSettings[key]);
-      }
+      } else if (key === 'retouchAlertInterval') {
+        field.value = ['1', '5', '15', '30', '60', '1D'].includes(String(savedSettings[key])) ? String(savedSettings[key]) : '5';
+      } else if (Number.isFinite(Number(savedSettings[key]))) field.value = String(savedSettings[key]);
     }
     if (Object.values(settingsFields).every((field) => field.value !== '')) {
       settingsStatus.textContent = 'Your trading defaults are saved on this device.';
@@ -1206,10 +1266,14 @@ settingsForm.addEventListener('submit', (event) => {
   event.preventDefault();
   if (!settingsForm.reportValidity()) return;
   const settings = Object.fromEntries(
-    Object.entries(settingsFields).map(([key, field]) => [key, Number(field.value)]),
+    Object.entries(settingsFields).map(([key, field]) => [key, key === 'lots' || key === 'retouchAlertInterval' ? field.value.trim() : Number(field.value)]),
   );
-  if (!Number.isInteger(settings.lots)) {
-    settingsFields.lots.setCustomValidity('Enter a whole number of lots.');
+  const lotsText = settings.lots;
+  const percentageLots = /^\d+(?:\.\d+)?%$/.test(lotsText);
+  const fixedLots = /^\d+$/.test(lotsText);
+  const percentage = percentageLots ? Number(lotsText.slice(0, -1)) : NaN;
+  if ((!fixedLots || Number(lotsText) < 1) && (!percentageLots || !(percentage > 0 && percentage <= 100))) {
+    settingsFields.lots.setCustomValidity('Enter a whole number of lots (for example, 2) or a percentage greater than 0% and up to 100% (for example, 10%).');
     settingsFields.lots.reportValidity();
     settingsFields.lots.setCustomValidity('');
     return;
@@ -1220,11 +1284,20 @@ settingsForm.addEventListener('submit', (event) => {
     settingsFields.retouchEmaPeriod.setCustomValidity('');
     return;
   }
+  if (!['1', '5', '15', '30', '60', '1D'].includes(settings.retouchAlertInterval)) {
+    settingsFields.retouchAlertInterval.setCustomValidity('Select a timeframe available on the spot chart.');
+    settingsFields.retouchAlertInterval.reportValidity();
+    settingsFields.retouchAlertInterval.setCustomValidity('');
+    return;
+  }
   try {
     localStorage.setItem(settingsStorageKey, JSON.stringify(settings));
     settingsStatus.textContent = 'Your trading defaults are saved on this device.';
     renderPaperOrders();
     if (chartData['spot-intraday']) redrawChart('spot-intraday');
+    retouchSoundContext = '';
+    previousSpotRetouches = new Set();
+    refreshSpotCandlesForRetouch();
     showNotice('Trading settings saved.');
   } catch {
     settingsStatus.textContent = 'Could not save settings in this browser.';
@@ -1609,10 +1682,13 @@ async function buyPaperOption(kind, withStopLoss = true) {
     return;
   }
   const capital = Number(settings.capital);
-  const lots = Number(settings.lots);
+  const lotsSetting = String(settings.lots).trim();
+  const percentMatch = lotsSetting.match(/^(\d+(?:\.\d+)?)%$/);
+  const fixedLots = /^\d+$/.test(lotsSetting) ? Number(lotsSetting) : null;
+  const capitalPercent = percentMatch ? Number(percentMatch[1]) : null;
   const profitPoints = Number(settings.profit);
   const stopLossPoints = withStopLoss ? Number(settings.stopLoss) : null;
-  if (!(capital > 0) || !Number.isInteger(lots) || lots < 1 || !(profitPoints > 0) || (withStopLoss && !(stopLossPoints > 0))) {
+  if (!(capital > 0) || (fixedLots === null && (capitalPercent === null || !(capitalPercent > 0 && capitalPercent <= 100))) || !(profitPoints > 0) || (withStopLoss && !(stopLossPoints > 0))) {
     showAppView('settings');
     showNotice('Check and save valid trading settings before placing an order.');
     return;
@@ -1626,9 +1702,18 @@ async function buyPaperOption(kind, withStopLoss = true) {
     const lotSize = Number(optionContracts[kind][selectedOptionIndex[kind]]?.lot_size)
       || Number(optionContracts[kind][selectedOptionIndex[kind]]?.lotSize)
       || UNDERLYINGS[currentUnderlying].lotSize;
-    const quantity = lots * lotSize;
     const openOrders = readPaperOrders().filter((order) => order.status === 'OPEN');
     const usedCapital = openOrders.reduce((sum, order) => sum + Number(order.entryPrice) * Number(order.quantity), 0);
+    const availableCapital = Math.max(0, capital - usedCapital);
+    const lots = fixedLots === null
+      ? Math.floor((availableCapital * capitalPercent / 100) / (entryPrice * lotSize))
+      : fixedLots;
+    if (lots < 1) {
+      throw new Error(fixedLots === null
+        ? `Your ${capitalPercent}% allocation of the available capital is not enough for one lot at ₹${formatNumber(entryPrice)}.`
+        : 'Enter at least one lot.');
+    }
+    const quantity = lots * lotSize;
     const orderValue = entryPrice * quantity;
     if (usedCapital + orderValue > capital) {
       throw new Error(`Order value ₹${formatNumber(orderValue)} would exceed the saved trading capital after open positions.`);
