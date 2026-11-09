@@ -181,19 +181,47 @@ function formatXAxisLabel(timestamp, interval) {
 
 function renderTimeAxis(kind, allCandles, interval, startIndex, windowSize) {
   const axis = document.querySelector(`#time-axis-${kind}`);
-  const count = 5;
-  const labels = Array.from({ length: count }, (_, index) => {
-    const slot = Math.round(index * (windowSize - 1) / (count - 1));
-    const candleIndex = startIndex + slot;
-    return candleIndex >= 0 && candleIndex < allCandles.length
-      ? formatXAxisLabel(allCandles[candleIndex][0], interval)
-      : '';
-  });
-  axis.replaceChildren(...labels.map((value) => {
-    const label = document.createElement('span');
-    label.textContent = value;
-    return label;
-  }));
+  const calendarInterval = ['1D', '1W', '1M'].includes(interval);
+  axis.classList.toggle('hour-axis', !calendarInterval);
+  axis.classList.toggle('calendar-axis', calendarInterval);
+  if (calendarInterval) {
+    const count = 5;
+    const labels = Array.from({ length: count }, (_, index) => {
+      const slot = Math.round(index * (windowSize - 1) / (count - 1));
+      const candleIndex = startIndex + slot;
+      return candleIndex >= 0 && candleIndex < allCandles.length
+        ? formatXAxisLabel(allCandles[candleIndex][0], interval)
+        : '';
+    });
+    axis.replaceChildren(...labels.map((value) => {
+      const label = document.createElement('span');
+      label.textContent = value;
+      return label;
+    }));
+  } else {
+    const first = Math.max(0, startIndex);
+    const last = Math.min(allCandles.length, startIndex + windowSize);
+    const hourStarts = [];
+    let previousHour = null;
+    for (let candleIndex = first; candleIndex < last; candleIndex += 1) {
+      const timestamp = allCandles[candleIndex][0];
+      const hourBucket = Math.floor((timestamp + 19800) / 3600);
+      if (hourBucket === previousHour) continue;
+      previousHour = hourBucket;
+      hourStarts.push({ candleIndex, timestamp });
+    }
+    const maxLabels = window.matchMedia('(max-width: 640px)').matches ? 10 : 8;
+    const labelStep = Math.max(1, Math.ceil(hourStarts.length / maxLabels));
+    const labels = hourStarts.filter((_, index) => index % labelStep === 0).map(({ candleIndex, timestamp }) => {
+      const label = document.createElement('span');
+      const istDate = new Date((timestamp + 19800) * 1000);
+      label.textContent = `${String(istDate.getUTCHours()).padStart(2, '0')}:00`;
+      label.style.setProperty('--axis-position', `${((candleIndex - startIndex + 0.5) / windowSize) * 100}%`);
+      label.setAttribute('aria-label', formatXAxisLabel(timestamp, interval));
+      return label;
+    });
+    axis.replaceChildren(...labels);
+  }
   axis.hidden = false;
 }
 
@@ -231,6 +259,127 @@ function calculateEma(values, period) {
     if (index > 0) previous = (value * multiplier) + (previous * (1 - multiplier));
     return previous;
   });
+}
+
+function formatEmaRetouchTime(timestamp, interval) {
+  const date = new Date(timestamp * 1000);
+  const isCalendarInterval = ['1D', '1W', '1M'].includes(interval);
+  return new Intl.DateTimeFormat('en-IN', isCalendarInterval
+    ? { day: '2-digit', month: 'short', timeZone: 'Asia/Kolkata' }
+    : { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' }).format(date);
+}
+
+function emaRetouchPeriod() {
+  try {
+    const settings = JSON.parse(localStorage.getItem(settingsStorageKey) || 'null');
+    const period = Number(settings?.retouchEmaPeriod);
+    return [50, 100, 200].includes(period) ? period : 200;
+  } catch {
+    return 200;
+  }
+}
+
+function getSpotRetouchEvents() {
+  const spotData = chartData['spot-intraday'];
+  const spotState = chartDrawState['spot-intraday'];
+  const period = emaRetouchPeriod();
+  if (!spotData || !spotState.emaVisible) return [];
+  const emaSettings = spotState.emas.find((ema) => Number(ema.period) === period);
+  if (!emaSettings?.enabled) return [];
+  const sourceTimeframe = emaSettings.timeframe || 'chart';
+  const resolution = sourceTimeframe === 'chart' ? spotData.interval : sourceTimeframe;
+  const sourceCandles = resolution === spotData.interval
+    ? spotData.candles
+    : emaHistoryCache.get(emaHistoryKey(spotData.symbol, resolution))?.candles;
+  if (!sourceCandles?.length) return [];
+  const emaValues = projectEmaToChart(sourceCandles, spotData.candles, period, resolution, spotData.interval);
+  const events = [];
+  for (let index = 0; index < spotData.candles.length; index += 1) {
+    const candle = spotData.candles[index];
+    const emaValue = emaValues[index];
+    if (Number.isFinite(emaValue) && candle[3] <= emaValue && candle[2] >= emaValue) {
+      events.push({ timestamp: candle[0], period });
+    }
+  }
+  return events;
+}
+
+const retouchChime = new Audio('/DING%20DONG.mp3');
+retouchChime.preload = 'auto';
+let retouchChimeUnlocked = false;
+let retouchSoundContext = '';
+let previousSpotRetouches = new Set();
+let retouchPollInProgress = false;
+
+function unlockRetouchChime() {
+  if (retouchChimeUnlocked) return;
+  retouchChime.muted = true;
+  const attempt = retouchChime.play();
+  if (attempt?.then) {
+    attempt.then(() => {
+      retouchChime.pause();
+      retouchChime.currentTime = 0;
+      retouchChime.muted = false;
+      retouchChimeUnlocked = true;
+    }).catch(() => {
+      retouchChime.muted = false;
+    });
+  }
+}
+
+document.addEventListener('pointerdown', unlockRetouchChime, { once: true });
+
+function playRetouchChime() {
+  retouchChime.currentTime = 0;
+  retouchChime.play().catch(() => {});
+}
+
+function observeSpotRetouches(events, spotData) {
+  const period = emaRetouchPeriod();
+  const emaSettings = chartDrawState['spot-intraday'].emas.find((ema) => Number(ema.period) === period);
+  const context = `${spotData.symbol}|${spotData.interval}|${period}|${emaSettings?.timeframe || 'chart'}|${Boolean(emaSettings?.enabled)}`;
+  const currentTimestamps = new Set(events.map((event) => event.timestamp));
+  if (context !== retouchSoundContext) {
+    retouchSoundContext = context;
+    previousSpotRetouches = currentTimestamps;
+    return;
+  }
+  const lastTimestamp = spotData.candles[spotData.candles.length - 1]?.[0] || 0;
+  const barSeconds = ['1D', '1W', '1M'].includes(spotData.interval)
+    ? 86400 : Number(spotData.interval) * 60;
+  const recentAfter = lastTimestamp - Math.max(1800, barSeconds * 2);
+  const isNewRecentTouch = events.some((event) => (
+    event.timestamp >= recentAfter && !previousSpotRetouches.has(event.timestamp)
+  ));
+  previousSpotRetouches = currentTimestamps;
+  if (isNewRecentTouch) playRetouchChime();
+}
+
+async function refreshSpotCandlesForRetouch() {
+  const kind = 'spot-intraday';
+  const data = chartData[kind];
+  const state = chartDrawState[kind];
+  const period = emaRetouchPeriod();
+  const ema = state.emas.find((item) => Number(item.period) === period);
+  if (retouchPollInProgress || document.visibilityState !== 'visible'
+    || !document.querySelector('#connection-state .status-dot')?.classList.contains('connected')
+    || !data || !state.emaVisible || !ema?.enabled
+    || ['1D', '1W', '1M'].includes(data.interval)) return;
+
+  retouchPollInProgress = true;
+  const { symbol, interval } = data;
+  const requestId = seriesRequestIds[kind];
+  try {
+    const query = new URLSearchParams({ symbol, resolution: interval, include_partial: '1' });
+    const payload = await fetchApi(`/api/market/history?${query}`);
+    if (seriesRequestIds[kind] !== requestId || series[kind].symbol !== symbol || series[kind].interval !== interval) return;
+    drawCandles(kind, payload, symbol, interval);
+    redrawOptionRetouchCharts();
+  } catch {
+    // Keep the last chart visible; the next poll can retry after a transient API error.
+  } finally {
+    retouchPollInProgress = false;
+  }
 }
 
 function emaTimeframeLabel(timeframe, chartInterval) {
@@ -353,6 +502,7 @@ function drawCandles(kind, payload, symbol, interval) {
   const candleGroup = makeSvgElement('g', { class: 'candle-layer' });
   const emaGroup = makeSvgElement('g', { class: 'ema-layer' });
   emaGroup.style.display = drawState.emaVisible ? '' : 'none';
+  const retouchGroup = makeSvgElement('g', { class: 'ema-retouch-markers', 'aria-label': 'Spot EMA retouch markers' });
   const crossGroup = makeSvgElement('g', { class: 'ema-cross-layer', 'aria-label': '100 and 200 EMA crossovers' });
   const trendGroup = makeSvgElement('g', { class: 'trendline-layer', 'clip-path': `url(#trend-clip-${kind})` });
   const currentPriceGroup = makeSvgElement('g', { class: 'current-price-marker', 'aria-label': `Latest price ${formatAxisPrice(currentPrice)}` });
@@ -428,7 +578,7 @@ function drawCandles(kind, payload, symbol, interval) {
       ? projectEmaToChart(cachedHistory.candles, allCandles, period, sourceTimeframe, interval)
       : [];
     const values = allValues.slice(firstDataIndex, firstDataIndex + candles.length);
-    emaValuesByPeriod.set(Number(period), { values, enabled: ema.enabled });
+    emaValuesByPeriod.set(Number(period), { values, allValues, enabled: ema.enabled });
     let hasPreviousPoint = false;
     const points = values.map((value, index) => {
       if (!Number.isFinite(value)) {
@@ -458,6 +608,91 @@ function drawCandles(kind, payload, symbol, interval) {
       legendNode.querySelector('.ema-legend-name').textContent = `EMA ${period} · ${emaTimeframeLabel(emaTimeframe, interval)}`;
       legendNode.querySelector('.ema-swatch').style.backgroundColor = ema.color;
       legendNode.style.display = ema.enabled ? '' : 'none';
+    }
+  }
+
+  const retouchPeriod = emaRetouchPeriod();
+  const retouchEma = emaValuesByPeriod.get(retouchPeriod);
+  if (drawState.emaVisible && retouchEma?.enabled
+    && kind === 'spot-intraday') {
+    observeSpotRetouches(getSpotRetouchEvents(), chartData[kind]);
+    let markerNumber = 0;
+    const visibleEnd = Math.min(view.end, allCandles.length);
+    for (let candleIndex = firstDataIndex; candleIndex < visibleEnd; candleIndex += 1) {
+      const candle = allCandles[candleIndex];
+      const emaValue = retouchEma.allValues[candleIndex];
+      if (!Number.isFinite(emaValue) || candle[3] > emaValue || candle[2] < emaValue) continue;
+      const visibleSlot = candleIndex - startIndex;
+      if (visibleSlot < 0 || visibleSlot >= view.window) continue;
+      const x = left + (visibleSlot + 0.5) * gap;
+      const markerY = y(emaValue);
+      if (markerY < top || markerY > bottom) continue;
+      const marker = makeSvgElement('g', {
+        class: 'ema-retouch-marker',
+        'aria-label': `${retouchPeriod} EMA touch at ${formatXAxisLabel(candle[0], interval)}`,
+      });
+      const title = makeSvgElement('title', {});
+      title.textContent = `${retouchPeriod} EMA touch · ${formatXAxisLabel(candle[0], interval)}`;
+      marker.append(title);
+      marker.append(makeSvgElement('path', {
+        d: `M${(x - 3).toFixed(2)},${(markerY - 1).toFixed(2)} l2.5,3 l5,-6`,
+        class: 'ema-retouch-tick',
+      }));
+      const alignRight = x > right - 38;
+      const alternateLabel = markerNumber % 2 === 1;
+      const label = makeSvgElement('text', {
+        x: (x + (alignRight ? -5 : 7)).toFixed(2),
+        y: (markerY < top + 15 || alternateLabel ? markerY + 11 : markerY - 6).toFixed(2),
+        class: 'ema-retouch-time',
+        'text-anchor': alignRight ? 'end' : 'start',
+      });
+      label.textContent = formatEmaRetouchTime(candle[0], interval);
+      marker.append(label);
+      retouchGroup.append(marker);
+      markerNumber += 1;
+    }
+  }
+
+  if (kind === 'call' || kind === 'put') {
+    const optionRetouchEvents = getSpotRetouchEvents();
+    const timeTolerance = interval === '1D' ? 36 * 3600
+      : interval === '1W' ? 4 * 86400
+        : interval === '1M' ? 20 * 86400 : Math.max(120, Number(interval) * 60 * 1.5);
+    let markerNumber = 0;
+    for (const event of optionRetouchEvents) {
+      const candleIndex = nearestCandleIndex(allCandles, event.timestamp);
+      const candle = allCandles[candleIndex];
+      if (!candle || Math.abs(candle[0] - event.timestamp) > timeTolerance) continue;
+      const visibleSlot = candleIndex - startIndex;
+      if (visibleSlot < 0 || visibleSlot >= view.window) continue;
+      const x = left + (visibleSlot + 0.5) * gap;
+      const marker = makeSvgElement('g', {
+        class: 'ema-retouch-option-marker',
+        'aria-label': `Spot ${event.period} EMA touch at ${formatXAxisLabel(event.timestamp, interval)}`,
+      });
+      const title = makeSvgElement('title', {});
+      title.textContent = `Spot ${event.period} EMA touch · ${formatXAxisLabel(event.timestamp, interval)}`;
+      marker.append(title);
+      marker.append(makeSvgElement('line', {
+        x1: x.toFixed(2), x2: x.toFixed(2), y1: top.toFixed(2), y2: bottom.toFixed(2),
+        class: 'ema-retouch-option-line',
+      }));
+      const tickY = bottom - 4;
+      marker.append(makeSvgElement('path', {
+        d: `M${(x - 3).toFixed(2)},${(tickY - 1).toFixed(2)} l2.5,3 l5,-6`,
+        class: 'ema-retouch-tick',
+      }));
+      const alignRight = x > right - 38;
+      const label = makeSvgElement('text', {
+        x: (x + (alignRight ? -5 : 7)).toFixed(2),
+        y: (bottom - (markerNumber % 2 ? 13 : 7)).toFixed(2),
+        class: 'ema-retouch-time',
+        'text-anchor': alignRight ? 'end' : 'start',
+      });
+      label.textContent = formatEmaRetouchTime(event.timestamp, interval);
+      marker.append(label);
+      retouchGroup.append(marker);
+      markerNumber += 1;
     }
   }
 
@@ -518,7 +753,7 @@ function drawCandles(kind, payload, symbol, interval) {
     }));
   }
 
-  document.querySelector(`#chart-${kind} g`).replaceChildren(definitions, gridGroup, candleGroup, emaGroup, crossGroup, trendGroup, currentPriceGroup, axisGroup);
+  document.querySelector(`#chart-${kind} g`).replaceChildren(definitions, gridGroup, candleGroup, emaGroup, retouchGroup, crossGroup, trendGroup, currentPriceGroup, axisGroup);
   if (drawState.emaVisible) {
     const neededTimeframes = new Set(drawState.emas
       .filter((ema) => ema.enabled)
@@ -559,6 +794,7 @@ async function loadSeries(kind, symbol = series[kind].symbol, interval = series[
     const result = await fetchApi(`/api/market/history?${query}`);
     if (seriesRequestIds[kind] !== requestId) return;
     drawCandles(kind, result, symbol, interval);
+    if (kind === 'spot-intraday') redrawOptionRetouchCharts();
   } catch (error) {
     if (seriesRequestIds[kind] !== requestId) return;
     showEmpty(kind, error.message, true);
@@ -947,6 +1183,7 @@ const settingsFields = {
   lots: document.querySelector('#lots-input'),
   profit: document.querySelector('#profit-input'),
   stopLoss: document.querySelector('#stop-loss-input'),
+  retouchEmaPeriod: document.querySelector('#retouch-ema-input'),
 };
 
 try {
@@ -977,10 +1214,17 @@ settingsForm.addEventListener('submit', (event) => {
     settingsFields.lots.setCustomValidity('');
     return;
   }
+  if (![50, 100, 200].includes(settings.retouchEmaPeriod)) {
+    settingsFields.retouchEmaPeriod.setCustomValidity('Select the 50 EMA, 100 EMA, or 200 EMA.');
+    settingsFields.retouchEmaPeriod.reportValidity();
+    settingsFields.retouchEmaPeriod.setCustomValidity('');
+    return;
+  }
   try {
     localStorage.setItem(settingsStorageKey, JSON.stringify(settings));
     settingsStatus.textContent = 'Your trading defaults are saved on this device.';
     renderPaperOrders();
+    if (chartData['spot-intraday']) redrawChart('spot-intraday');
     showNotice('Trading settings saved.');
   } catch {
     settingsStatus.textContent = 'Could not save settings in this browser.';
@@ -1609,6 +1853,27 @@ document.querySelector('#open-orders').addEventListener('click', () => {
   refreshPaperOrders();
 });
 document.querySelector('#refresh-orders').addEventListener('click', refreshPaperOrders);
+document.querySelector('#clear-order-history').addEventListener('click', () => {
+  if (refreshingPaperQuotes) {
+    showNotice('Wait for the order refresh to finish before clearing history.');
+    return;
+  }
+  if (!readPaperOrders().length) {
+    showNotice('There are no paper trades to clear.');
+    return;
+  }
+  const confirmed = window.confirm(
+    'Clear all open positions and completed trades from this browser? This cannot be undone. Saved trading capital will remain unchanged.',
+  );
+  if (!confirmed) return;
+  try {
+    savePaperOrders([]);
+    renderPaperOrders();
+    showNotice('All open positions and completed trades were cleared. Saved trading capital is unchanged.');
+  } catch {
+    showNotice('Could not clear paper trade history in this browser.');
+  }
+});
 document.querySelectorAll('[data-paper-buy]').forEach((button) => {
   button.addEventListener('click', () => buyPaperOption(button.dataset.paperBuy));
 });
@@ -1620,7 +1885,15 @@ window.setInterval(refreshPaperOrders, 15000);
 
 function redrawChart(kind) {
   const data = chartData[kind];
-  if (data) drawCandles(kind, data.payload, data.symbol, data.interval);
+  if (data) {
+    drawCandles(kind, data.payload, data.symbol, data.interval);
+    if (kind === 'spot-intraday') redrawOptionRetouchCharts();
+  }
+}
+
+function redrawOptionRetouchCharts() {
+  redrawChart('call');
+  redrawChart('put');
 }
 
 function zoomChart(kind, action, anchorRatio = 1) {
@@ -2119,3 +2392,4 @@ document.querySelectorAll('.interval-control select').forEach((select) => {
 });
 
 refreshConnectionStatus();
+window.setInterval(refreshSpotCandlesForRetouch, 60000);

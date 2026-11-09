@@ -389,7 +389,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return
             else:
                 interval_seconds = int(resolution) * 60
-                range_to = int(time.time()) - interval_seconds
+                include_partial = parse_qs(parsed.query).get("include_partial", [""])[0] == "1"
+                range_to = int(time.time()) - (0 if include_partial else interval_seconds)
                 # Keep more intraday candles available so chart panning can
                 # reveal history beyond the initially visible window.
                 range_from = range_to - 30 * 24 * 60 * 60

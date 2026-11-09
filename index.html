@@ -139,13 +139,14 @@
             <label class="setting-field" for="lots-input"><span>Default lots per trade</span><input id="lots-input" name="lots" type="number" min="1" step="1" inputmode="numeric" placeholder="Enter lots" required /></label>
             <label class="setting-field" for="profit-input"><span>Default profit points</span><input id="profit-input" name="profit" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="Enter points" required /></label>
             <label class="setting-field" for="stop-loss-input"><span>Default stop loss points</span><input id="stop-loss-input" name="stopLoss" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="Enter points" required /></label>
+            <label class="setting-field" for="retouch-ema-input"><span>Plot re-touch on</span><select id="retouch-ema-input" name="retouchEmaPeriod"><option value="50">50 EMA</option><option value="100">100 EMA</option><option value="200" selected>200 EMA</option></select></label>
             <div class="settings-actions"><span id="settings-status" role="status" aria-live="polite">Set your defaults for the trading workspace.</span><button class="button button-primary" type="submit">Save settings</button></div>
           </form>
         </section>
       </section>
 
       <section class="orders-view" id="orders-view" aria-labelledby="orders-title" hidden>
-        <div class="orders-page-heading"><div><span class="eyebrow">PAPER WORKSPACE</span><h1 id="orders-title">Active orders</h1><p>Simulated option buys and their live paper P&amp;L.</p></div><button class="button button-secondary" id="refresh-orders" type="button">Refresh</button></div>
+        <div class="orders-page-heading"><div><span class="eyebrow">PAPER WORKSPACE</span><h1 id="orders-title">Active orders</h1><p>Simulated option buys and their live paper P&amp;L.</p></div><div class="orders-heading-actions"><button class="button button-secondary" id="refresh-orders" type="button">Refresh</button><button class="button button-secondary clear-history-button" id="clear-order-history" type="button">Clear history</button></div></div>
         <div class="paper-mode-note">Paper orders are saved in this browser and are not sent to FYERS.</div>
         <p class="orders-summary" id="orders-summary"></p>
         <div class="orders-total-pnl"><span>Total Profit/Loss</span><strong id="orders-total-pnl">₹0.00</strong></div>

@@ -224,7 +224,8 @@ def _market_request(handler, route: str, query: dict[str, list[str]], settings: 
             _json(handler, 200, {"s": "ok", "candles": [candles[key] for key in sorted(candles)]})
             return
         seconds = int(resolution) * 60
-        range_to = int(time.time()) - seconds
+        include_partial = query.get("include_partial", [""])[0] == "1"
+        range_to = int(time.time()) - (0 if include_partial else seconds)
         params = {
             "symbol": symbol, "resolution": fyers_resolution, "date_format": "0",
             "range_from": str(range_to - 30 * 86400), "range_to": str(range_to),
