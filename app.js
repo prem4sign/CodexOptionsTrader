@@ -271,9 +271,17 @@ function candleTouchesEma(candle, emaValue) {
   return Number.isFinite(emaValue) && candle[3] <= emaValue && candle[2] >= emaValue;
 }
 
+function candleRetouchesEmaInTrend(candle, emaValue) {
+  if (!candleTouchesEma(candle, emaValue)) return false;
+  const open = Number(candle[1]);
+  const close = Number(candle[4]);
+  return (open > emaValue && close >= emaValue)
+    || (open < emaValue && close <= emaValue);
+}
+
 function isRetouchStart(candles, emaValues, index) {
-  if (!candleTouchesEma(candles[index], emaValues[index])) return false;
-  return index === 0 || !candleTouchesEma(candles[index - 1], emaValues[index - 1]);
+  if (!candleRetouchesEmaInTrend(candles[index], emaValues[index])) return false;
+  return index === 0 || !candleRetouchesEmaInTrend(candles[index - 1], emaValues[index - 1]);
 }
 
 function formatEmaRetouchTime(timestamp, interval) {
