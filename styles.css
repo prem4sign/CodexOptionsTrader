@@ -171,3 +171,11 @@
   .time-axis.hour-axis{height:35px}
   .time-axis.hour-axis span{transform:translate(-50%,-50%) rotate(-90deg);font-size:8px}
 }
+
+@media(max-width:640px){
+  .page-shell{width:100%;max-width:none}
+  .market-overview,.market-overview>* ,.connection-notice,.chart-stack,.chart-card{width:100%;min-width:0}
+  .overview-controls{width:100%;min-width:0;align-self:stretch}
+  .overview-controls select{width:100%;min-width:0}
+  .chart-stack{grid-template-columns:minmax(0,1fr)}
+}
