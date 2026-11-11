@@ -31,9 +31,9 @@ const chartViews = {};
 const seriesRequestIds = {};
 const workspacesStorageKey = 'options-desk-chart-workspaces';
 const defaultEmaSettings = [
-  { period: 50, color: '#f59e0b', enabled: true, timeframe: 'chart' },
-  { period: 100, color: '#3b82f6', enabled: true, timeframe: 'chart' },
-  { period: 200, color: '#000000', enabled: true, timeframe: 'chart' },
+  { period: 50, color: '#f59e0b', enabled: true, timeframe: '5' },
+  { period: 100, color: '#3b82f6', enabled: true, timeframe: '5' },
+  { period: 200, color: '#ffffff', enabled: true, timeframe: '5' },
 ];
 const emaHistoryCache = new Map();
 const emaHistoryRequests = new Map();
