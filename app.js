@@ -1989,13 +1989,31 @@ function redrawOptionRetouchCharts() {
   redrawChart('put');
 }
 
+function twoSessionCandleCount(data) {
+  const candles = data?.candles || [];
+  if (!candles.length) return 1;
+  if (['1D', '1W', '1M'].includes(data.interval)) return Math.min(2, candles.length);
+
+  const sessionStarts = [];
+  let previousSession = null;
+  for (let index = 0; index < candles.length; index += 1) {
+    const session = Math.floor((candles[index][0] + 19800) / 86400);
+    if (session !== previousSession) {
+      sessionStarts.push(index);
+      previousSession = session;
+    }
+  }
+  const startIndex = sessionStarts[Math.max(0, sessionStarts.length - 2)] || 0;
+  return candles.length - startIndex;
+}
+
 function zoomChart(kind, action, anchorRatio = 1) {
   const data = chartData[kind];
   const view = chartViews[kind];
   if (!data || !view) return;
   const total = view.total;
   if (action === 'reset') {
-    view.window = total;
+    view.window = Math.min(total, twoSessionCandleCount(data));
     view.end = total;
     view.priceScale = 1;
     view.priceOffset = 0;
