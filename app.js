@@ -508,12 +508,6 @@ function nearestCandleIndex(candles, timestamp) {
 }
 
 function drawCandles(kind, payload, symbol, interval) {
-  const svgElement = document.querySelector(`#chart-${kind}`);
-  if (window.matchMedia('(max-width: 640px)').matches) {
-    const renderedWidth = svgElement.clientWidth || 320;
-    const scaledLabelSize = Math.max(8, Math.min(28, (8 * 760) / renderedWidth));
-    svgElement.style.setProperty('--mobile-chart-text-size', `${scaledLabelSize}px`);
-  }
   const raw = payload.candles || payload.data?.candles || [];
   const allCandles = uniqueCandlesByTimestamp(raw
     .filter((row) => Array.isArray(row) && row.length >= 5 && row.slice(0, 5).every((value) => Number.isFinite(Number(value))))
