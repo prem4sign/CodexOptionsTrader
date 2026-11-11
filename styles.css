@@ -173,9 +173,9 @@
 }
 
 @media(max-width:640px){
-  .price-axis-label{fill:#d5deeb;font-size:16px;font-weight:650;paint-order:stroke;stroke:#0b111b;stroke-width:2px;stroke-linejoin:round}
-  .current-price-label{font-size:12px}
+  .price-axis-label{fill:#d5deeb;font-size:var(--mobile-chart-text-size,20px);font-weight:650;paint-order:stroke;stroke:#0b111b;stroke-width:2px;stroke-linejoin:round}
+  .current-price-label{font-size:var(--mobile-chart-text-size,20px)}
   .current-price-label-bg{stroke-width:1}
-  .ema-retouch-time{font-size:11px;stroke-width:3px}
+  .ema-retouch-time{font-size:var(--mobile-chart-text-size,20px);stroke-width:3px}
   .ema-retouch-tick{stroke-width:2.4}
 }
