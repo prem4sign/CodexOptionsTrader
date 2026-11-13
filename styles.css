@@ -64,7 +64,8 @@
 :root:not([data-theme="light"]) .ema-swatch.ema-200{box-shadow:0 0 0 1px #d7e1ed}
 .ema-legend-item[data-ema-legend$="-0"] .ema-swatch{background:#f59e0b}
 .ema-legend-item[data-ema-legend$="-1"] .ema-swatch{background:#3b82f6}
-.ema-legend-item[data-ema-legend$="-2"] .ema-swatch{background:#000}
+.ema-legend-item[data-ema-legend$="-2"] .ema-swatch{background:#fff}
+.ema-legend-item[data-ema-legend$="-3"] .ema-swatch{background:#a78bfa}
 :root:not([data-theme="light"]) .ema-legend-item[data-ema-legend$="-2"] .ema-swatch{box-shadow:0 0 0 1px #d7e1ed}
 .indicator-settings-button{width:22px;padding:0;font-size:12px}
 .indicator-dialog{width:min(430px,calc(100vw - 28px));max-width:none;padding:0;border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--text);box-shadow:0 20px 60px rgba(0,0,0,.4)}

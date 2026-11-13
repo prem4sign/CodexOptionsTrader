@@ -34,6 +34,7 @@ const defaultEmaSettings = [
   { period: 50, color: '#f59e0b', enabled: true, timeframe: '5' },
   { period: 100, color: '#3b82f6', enabled: true, timeframe: '5' },
   { period: 200, color: '#ffffff', enabled: true, timeframe: '5' },
+  { period: 200, color: '#a78bfa', enabled: true, timeframe: '15' },
 ];
 const emaHistoryCache = new Map();
 const emaHistoryRequests = new Map();
@@ -1146,7 +1147,7 @@ async function loadWorkspace(workspace) {
               : defaults.period,
             color: /^#[0-9a-f]{6}$/i.test(saved.color || '') ? saved.color : defaults.color,
             enabled: saved.enabled !== false,
-            timeframe: emaTimeframeOptions.some(([timeframe]) => timeframe === saved.timeframe) ? saved.timeframe : 'chart',
+            timeframe: emaTimeframeOptions.some(([timeframe]) => timeframe === saved.timeframe) ? saved.timeframe : defaults.timeframe,
           };
         })
         : defaultEmaSettings.map((ema) => ({ ...ema }));
