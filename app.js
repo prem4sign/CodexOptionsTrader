@@ -349,6 +349,64 @@ function getSpotRetouchEvents() {
   return events;
 }
 
+function getFirstEmaRetouchAfterCrossEvents() {
+  const spotData = chartData['spot-intraday'];
+  const spotState = chartDrawState['spot-intraday'];
+  if (!spotData || !spotState.emaVisible) return [];
+  const firstEma = spotState.emas[0];
+  const secondEma = spotState.emas[1];
+  if (!firstEma?.enabled || !secondEma?.enabled) return [];
+
+  const projectSetting = (setting) => {
+    const period = Number(setting.period);
+    const sourceTimeframe = setting.timeframe || 'chart';
+    const resolution = sourceTimeframe === 'chart' ? spotData.interval : sourceTimeframe;
+    const sourceCandles = resolution === spotData.interval
+      ? spotData.candles
+      : emaHistoryCache.get(emaHistoryKey(spotData.symbol, resolution))?.candles;
+    if (!sourceCandles?.length) return null;
+    return projectEmaToChart(sourceCandles, spotData.candles, period, resolution, spotData.interval);
+  };
+
+  const firstValues = projectSetting(firstEma);
+  const secondValues = projectSetting(secondEma);
+  if (!firstValues || !secondValues) return [];
+
+  const events = [];
+  let pendingDirection = null;
+  const candles = spotData.candles;
+  for (let index = 1; index < candles.length; index += 1) {
+    const previousDifference = firstValues[index - 1] - secondValues[index - 1];
+    const currentDifference = firstValues[index] - secondValues[index];
+    if (![previousDifference, currentDifference].every(Number.isFinite)) continue;
+    if (previousDifference <= 0 && currentDifference > 0) {
+      pendingDirection = 'bullish';
+      continue;
+    }
+    if (previousDifference >= 0 && currentDifference < 0) {
+      pendingDirection = 'bearish';
+      continue;
+    }
+    if (!pendingDirection) continue;
+    const candle = candles[index];
+    const emaValue = secondValues[index];
+    const directionalRetouch = candleTouchesEma(candle, emaValue)
+      && (pendingDirection === 'bullish'
+        ? Number(candle[1]) > emaValue
+        : Number(candle[1]) < emaValue);
+    if (!directionalRetouch) continue;
+
+    events.push({
+      timestamp: candle[0],
+      period: Number(secondEma.period),
+      emaValue,
+      direction: pendingDirection,
+    });
+    pendingDirection = null;
+  }
+  return events;
+}
+
 const retouchChime = new Audio('/DING%20DONG.mp3');
 retouchChime.preload = 'auto';
 let retouchChimeUnlocked = false;
@@ -628,7 +686,7 @@ function drawCandles(kind, payload, symbol, interval) {
     candleGroup.append(wick, body);
   }
 
-  const emaValuesByPeriod = new Map();
+  const emaValuesByIndex = new Map();
   for (const [emaIndex, ema] of drawState.emas.entries()) {
     const period = ema.period;
     const emaTimeframe = ema.timeframe || 'chart';
@@ -641,7 +699,7 @@ function drawCandles(kind, payload, symbol, interval) {
       ? projectEmaToChart(cachedHistory.candles, allCandles, period, sourceTimeframe, interval)
       : [];
     const values = allValues.slice(firstDataIndex, firstDataIndex + candles.length);
-    emaValuesByPeriod.set(Number(period), { values, allValues, enabled: ema.enabled });
+    emaValuesByIndex.set(emaIndex, { values, allValues, enabled: ema.enabled });
     let hasPreviousPoint = false;
     const points = values.map((value, index) => {
       if (!Number.isFinite(value)) {
@@ -675,7 +733,8 @@ function drawCandles(kind, payload, symbol, interval) {
   }
 
   const retouchPeriod = emaRetouchPeriod();
-  const retouchEma = emaValuesByPeriod.get(retouchPeriod);
+  const retouchEmaIndex = drawState.emas.findIndex((ema) => Number(ema.period) === retouchPeriod);
+  const retouchEma = emaValuesByIndex.get(retouchEmaIndex);
   if (drawState.emaVisible && retouchEma?.enabled
     && kind === 'spot-intraday') {
     let markerNumber = 0;
@@ -712,6 +771,38 @@ function drawCandles(kind, payload, symbol, interval) {
       marker.append(label);
       retouchGroup.append(marker);
       markerNumber += 1;
+    }
+  }
+
+  if (drawState.emaVisible && kind === 'spot-intraday') {
+    const crossoverRetouches = getFirstEmaRetouchAfterCrossEvents();
+    for (const event of crossoverRetouches) {
+      const candleIndex = nearestCandleIndex(allCandles, event.timestamp);
+      const candle = allCandles[candleIndex];
+      if (!candle || candle[0] !== event.timestamp) continue;
+      const visibleSlot = candleIndex - startIndex;
+      if (visibleSlot < 0 || visibleSlot >= view.window) continue;
+      const x = left + (visibleSlot + 0.5) * gap;
+      const markerY = y(event.emaValue);
+      if (markerY < top || markerY > bottom) continue;
+      const marker = makeSvgElement('g', {
+        class: 'ema-cross-retouch-marker',
+        'aria-label': `First ${event.period} EMA retouch after ${event.direction} EMA crossover at ${formatXAxisLabel(event.timestamp, interval)}`,
+      });
+      const title = makeSvgElement('title', {});
+      title.textContent = `First EMA ${event.period} retouch after ${event.direction} crossover · ${formatXAxisLabel(event.timestamp, interval)}`;
+      marker.append(title);
+      const star = makeSvgElement('text', {
+        x: x.toFixed(2), y: (markerY - 2).toFixed(2), class: 'ema-cross-retouch-star', 'text-anchor': 'middle',
+      });
+      star.textContent = '*';
+      marker.append(star);
+      const label = makeSvgElement('text', {
+        x: (x + 7).toFixed(2), y: (markerY - 5).toFixed(2), class: 'ema-cross-retouch-time',
+      });
+      label.textContent = formatEmaRetouchTime(event.timestamp, interval);
+      marker.append(label);
+      crossGroup.append(marker);
     }
   }
 
@@ -756,10 +847,44 @@ function drawCandles(kind, payload, symbol, interval) {
       retouchGroup.append(marker);
       markerNumber += 1;
     }
+
+    const crossoverRetouches = getFirstEmaRetouchAfterCrossEvents();
+    for (const event of crossoverRetouches) {
+      const candleIndex = nearestCandleIndex(allCandles, event.timestamp);
+      const candle = allCandles[candleIndex];
+      if (!candle || Math.abs(candle[0] - event.timestamp) > timeTolerance) continue;
+      const visibleSlot = candleIndex - startIndex;
+      if (visibleSlot < 0 || visibleSlot >= view.window) continue;
+      const x = left + (visibleSlot + 0.5) * gap;
+      const marker = makeSvgElement('g', {
+        class: 'ema-cross-retouch-option-marker',
+        'aria-label': `First spot EMA ${event.period} retouch after ${event.direction} crossover at ${formatXAxisLabel(event.timestamp, interval)}`,
+      });
+      const title = makeSvgElement('title', {});
+      title.textContent = `First spot EMA ${event.period} retouch after ${event.direction} crossover · ${formatXAxisLabel(event.timestamp, interval)}`;
+      marker.append(title);
+      marker.append(makeSvgElement('line', {
+        x1: x.toFixed(2), x2: x.toFixed(2), y1: top.toFixed(2), y2: bottom.toFixed(2),
+        class: 'ema-cross-retouch-line',
+      }));
+      const star = makeSvgElement('text', {
+        x: x.toFixed(2), y: (bottom - 4).toFixed(2), class: 'ema-cross-retouch-star', 'text-anchor': 'middle',
+      });
+      star.textContent = '*';
+      marker.append(star);
+      const label = makeSvgElement('text', {
+        x: (x + 6).toFixed(2), y: (bottom - 8).toFixed(2), class: 'ema-cross-retouch-time',
+      });
+      label.textContent = formatEmaRetouchTime(event.timestamp, interval);
+      marker.append(label);
+      retouchGroup.append(marker);
+    }
   }
 
-  const fastEma = emaValuesByPeriod.get(100);
-  const slowEma = emaValuesByPeriod.get(200);
+  const fastEmaIndex = drawState.emas.findIndex((ema) => Number(ema.period) === 100);
+  const slowEmaIndex = drawState.emas.findIndex((ema) => Number(ema.period) === 200);
+  const fastEma = emaValuesByIndex.get(fastEmaIndex);
+  const slowEma = emaValuesByIndex.get(slowEmaIndex);
   if (drawState.emaVisible && fastEma?.enabled && slowEma?.enabled) {
     for (let index = 1; index < Math.min(fastEma.values.length, slowEma.values.length); index += 1) {
       const previousDifference = fastEma.values[index - 1] - slowEma.values[index - 1];
