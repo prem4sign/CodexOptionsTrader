@@ -19,6 +19,12 @@ let selectedOptionIndex = { call: -1, put: -1 };
 let optionLoading = { call: false, put: false };
 let busy = false;
 let newsLoading = false;
+const newsStorageKey = 'options-desk-market-news-cache';
+let latestNewsItems = [];
+try {
+  const cachedNewsItems = JSON.parse(localStorage.getItem(newsStorageKey) || '[]');
+  if (Array.isArray(cachedNewsItems)) latestNewsItems = cachedNewsItems;
+} catch { /* The page can still load a fresh verdict without browser storage. */ }
 
 const series = {
   call: { symbol: '', interval: '5' },
@@ -2026,6 +2032,14 @@ function renderVerdict(items, error = '') {
   });
   const today = verdictForNews(todayItems);
   const nextDays = verdictForNews(recentItems);
+  const inlineVerdict = document.querySelector('#market-verdict-inline');
+  const sourceVerdict = todayItems.length ? today : nextDays;
+  const verdictLabel = error && !filtered.length ? 'Neutral'
+    : !todayItems.length && !recentItems.length ? 'Neutral'
+      : sourceVerdict.label.startsWith('Positive') ? 'Positive'
+        : sourceVerdict.label.startsWith('Negative') ? 'Negative' : 'Neutral';
+  inlineVerdict.className = `market-verdict-inline ${sourceVerdict.color}`;
+  inlineVerdict.replaceChildren(Object.assign(document.createElement('strong'), { textContent: 'Market Verdict:' }), document.createTextNode(` ${verdictLabel}`));
   document.querySelector('#verdict-today-title').textContent = todayItems.length ? today.label : error ? 'News unavailable' : 'No clear signal';
   document.querySelector('#verdict-today-detail').textContent = todayItems.length ? `${today.detail} since midnight. Headline tone only.` : error || 'No relevant headlines published today.';
   document.querySelector('#verdict-days-title').textContent = recentItems.length ? nextDays.label : error ? 'News unavailable' : 'No clear signal';
@@ -2074,11 +2088,13 @@ async function loadLatestNews(force = false) {
   updated.textContent = 'Summarizing recent headlines…';
   try {
     const result = await fetchApi(`/api/news${force ? '?refresh=1' : ''}`);
-    renderVerdict(result.items || [], result.error || '');
+    latestNewsItems = Array.isArray(result.items) ? result.items : [];
+    try { localStorage.setItem(newsStorageKey, JSON.stringify(latestNewsItems)); } catch { /* Keep the in-memory verdict if storage is unavailable. */ }
+    renderVerdict(latestNewsItems, result.error || '');
     const stamp = result.fetchedAt ? new Date(result.fetchedAt) : new Date();
     updated.textContent = `Updated ${new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }).format(stamp)} IST · Based on ${result.items?.length || 0} recent headlines`;
   } catch (error) {
-    renderVerdict([], `Could not load news: ${error.message}`);
+    renderVerdict(latestNewsItems, latestNewsItems.length ? '' : `Could not load news: ${error.message}`);
     updated.textContent = 'Check your internet connection and try Refresh.';
   } finally {
     refresh.disabled = false;
@@ -2104,6 +2120,8 @@ document.querySelector('#open-news').addEventListener('click', async () => {
   await loadLatestNews();
 });
 document.querySelector('#refresh-news').addEventListener('click', () => loadLatestNews(true));
+if (latestNewsItems.length) renderVerdict(latestNewsItems);
+void loadLatestNews();
 document.querySelector('#open-orders').addEventListener('click', () => {
   renderPaperOrders();
   showAppView('orders');
@@ -2670,6 +2688,7 @@ document.querySelector('#underlying-select').addEventListener('change', async (e
   const nextUnderlying = event.target.value;
   if (!UNDERLYINGS[nextUnderlying] || busy) return;
   currentUnderlying = nextUnderlying;
+  renderVerdict(latestNewsItems);
   localStorage.setItem(underlyingStorageKey, currentUnderlying);
   selectedExpiry = '';
   selectedExpiryDate = '';
