@@ -49,6 +49,9 @@ const chartDrawState = Object.fromEntries(['call', 'put', 'spot-intraday', 'spot
   extendTrendlineRight: true,
   trendlines: [],
   preview: null,
+  drawPencil: false,
+  freehandMarks: [],
+  freehandPreview: null,
 }]));
 
 function showNotice(message) {
@@ -626,6 +629,7 @@ function drawCandles(kind, payload, symbol, interval) {
   const retouchGroup = makeSvgElement('g', { class: 'ema-retouch-markers', 'aria-label': 'Spot EMA retouch markers' });
   const crossGroup = makeSvgElement('g', { class: 'ema-cross-layer', 'aria-label': '100 and 200 EMA crossovers' });
   const trendGroup = makeSvgElement('g', { class: 'trendline-layer', 'clip-path': `url(#trend-clip-${kind})` });
+  const freehandGroup = makeSvgElement('g', { class: 'freehand-mark-layer', 'clip-path': `url(#trend-clip-${kind})` });
   const currentPriceGroup = makeSvgElement('g', { class: 'current-price-marker', 'aria-label': `Latest price ${formatAxisPrice(currentPrice)}` });
   if (currentPriceY >= top && currentPriceY <= bottom) {
     currentPriceGroup.append(makeSvgElement('line', {
@@ -940,7 +944,41 @@ function drawCandles(kind, payload, symbol, interval) {
     }));
   }
 
-  document.querySelector(`#chart-${kind} g`).replaceChildren(definitions, gridGroup, candleGroup, emaGroup, retouchGroup, crossGroup, trendGroup, currentPriceGroup, axisGroup);
+  const spotDrawingState = chartDrawState['spot-intraday'];
+  const drawingSourceSymbol = chartData['spot-intraday']?.symbol;
+  const freehandMarks = [...spotDrawingState.freehandMarks];
+  if (kind === 'spot-intraday' && spotDrawingState.freehandPreview) freehandMarks.push(spotDrawingState.freehandPreview);
+  const markTimeTolerance = interval === '1D' ? 36 * 3600
+    : interval === '1W' ? 4 * 86400
+      : interval === '1M' ? 20 * 86400 : Math.max(120, Number(interval) * 60 * 1.5);
+  for (const mark of freehandMarks) {
+    if (mark.symbol !== drawingSourceSymbol || mark.points.length < 2) continue;
+    let pathData = '';
+    let drawingSegment = false;
+    for (const point of mark.points) {
+      const candleIndex = nearestCandleIndex(allCandles, point.timestamp);
+      const candle = allCandles[candleIndex];
+      const visibleSlot = candleIndex - startIndex;
+      const matchesTime = kind === 'spot-intraday' || (candle && Math.abs(candle[0] - point.timestamp) <= markTimeTolerance);
+      if (!candle || !matchesTime || visibleSlot < 0 || visibleSlot >= view.window) {
+        drawingSegment = false;
+        continue;
+      }
+      const x = left + (visibleSlot + 0.5) * gap;
+      const markY = kind === 'spot-intraday'
+        ? y(point.price)
+        : top + Math.max(0, Math.min(1, point.yRatio)) * (bottom - top);
+      if (!Number.isFinite(markY) || markY < top || markY > bottom) {
+        drawingSegment = false;
+        continue;
+      }
+      pathData += `${drawingSegment ? 'L' : 'M'}${x.toFixed(2)},${markY.toFixed(2)} `;
+      drawingSegment = true;
+    }
+    if (pathData) freehandGroup.append(makeSvgElement('path', { d: pathData.trim(), class: 'freehand-mark' }));
+  }
+
+  document.querySelector(`#chart-${kind} g`).replaceChildren(definitions, gridGroup, candleGroup, emaGroup, retouchGroup, crossGroup, trendGroup, freehandGroup, currentPriceGroup, axisGroup);
   if (drawState.emaVisible) {
     const neededTimeframes = new Set(drawState.emas
       .filter((ema) => ema.enabled)
@@ -2184,6 +2222,16 @@ function updateChartTools(kind) {
   document.querySelector(`#chart-${kind}`).classList.toggle('draw-mode', drawState.drawTrendline);
 }
 
+function updateSpotMarkupTools() {
+  const drawState = chartDrawState['spot-intraday'];
+  const pencilButton = document.querySelector('#spot-pencil-toggle');
+  pencilButton.classList.toggle('is-active', drawState.drawPencil);
+  pencilButton.setAttribute('aria-pressed', String(drawState.drawPencil));
+  pencilButton.setAttribute('aria-label', drawState.drawPencil ? 'Cancel spot chart drawing' : 'Draw on spot chart');
+  document.querySelector('#spot-markup-clear').disabled = drawState.freehandMarks.length === 0;
+  document.querySelector('#chart-spot-intraday').classList.toggle('pencil-mode', drawState.drawPencil);
+}
+
 function updateIndicatorLegend(kind) {
   const drawState = chartDrawState[kind];
   for (const [index, ema] of drawState.emas.entries()) {
@@ -2373,6 +2421,25 @@ document.querySelectorAll('[data-trendline-clear]').forEach((button) => {
   });
 });
 
+document.querySelector('#spot-pencil-toggle').addEventListener('click', () => {
+  const drawState = chartDrawState['spot-intraday'];
+  drawState.drawPencil = !drawState.drawPencil;
+  drawState.drawTrendline = false;
+  drawState.preview = null;
+  updateChartTools('spot-intraday');
+  updateSpotMarkupTools();
+  showNotice(drawState.drawPencil ? 'Pencil mode: drag on the spot chart to draw.' : 'Pencil mode cancelled.');
+});
+
+document.querySelector('#spot-markup-clear').addEventListener('click', () => {
+  const drawState = chartDrawState['spot-intraday'];
+  drawState.freehandMarks = [];
+  drawState.freehandPreview = null;
+  drawState.drawPencil = false;
+  updateSpotMarkupTools();
+  redrawChart('spot-intraday');
+});
+
 function chartPointFromEvent(kind, svg, event) {
   const data = chartData[kind];
   const view = chartViews[kind];
@@ -2394,6 +2461,15 @@ function chartPointFromEvent(kind, svg, event) {
   const yPosition = Math.max(6, Math.min(174, viewY));
   const price = scaledHigh - ((yPosition - 6) / (174 - 6)) * span;
   return { timestamp: data.candles[globalIndex][0], price };
+}
+
+function freehandPointFromEvent(svg, event) {
+  const point = chartPointFromEvent('spot-intraday', svg, event);
+  if (!point) return null;
+  const bounds = svg.getBoundingClientRect();
+  const viewY = ((event.clientY - bounds.top) / Math.max(bounds.height, 1)) * 180;
+  point.yRatio = Math.max(0, Math.min(1, (viewY - 6) / (174 - 6)));
+  return point;
 }
 
 function trendlineHitTest(kind, svg, event) {
@@ -2457,6 +2533,14 @@ document.querySelectorAll('.candlestick-chart').forEach((svg) => {
     const viewBoxX = ((event.clientX - bounds.left) / Math.max(bounds.width, 1)) * 760;
     if (viewBoxX >= 692) {
       dragStart = { mode: 'price-scale', y: event.clientY, priceScale: view.priceScale || 1 };
+    } else if (kind === 'spot-intraday' && chartDrawState[kind].drawPencil) {
+      const point = freehandPointFromEvent(svg, event);
+      if (!point) return;
+      chartDrawState[kind].freehandPreview = {
+        symbol: chartData[kind].symbol,
+        points: [point],
+      };
+      dragStart = { mode: 'freehand', x: event.clientX, y: event.clientY };
     } else if (chartDrawState[kind].drawTrendline) {
       const start = chartPointFromEvent(kind, svg, event);
       if (!start) return;
@@ -2487,6 +2571,16 @@ document.querySelectorAll('.candlestick-chart').forEach((svg) => {
     if (dragStart.mode === 'price-scale') {
       const verticalChange = event.clientY - dragStart.y;
       view.priceScale = Math.max(0.12, Math.min(12, dragStart.priceScale * Math.exp(verticalChange * 0.012)));
+    } else if (dragStart.mode === 'freehand') {
+      if (Math.hypot(event.clientX - dragStart.x, event.clientY - dragStart.y) >= 2) {
+        const point = freehandPointFromEvent(svg, event);
+        const preview = chartDrawState[kind].freehandPreview;
+        if (point && preview) {
+          preview.points.push(point);
+          dragStart.x = event.clientX;
+          dragStart.y = event.clientY;
+        }
+      }
     } else if (dragStart.mode === 'trendline') {
       const end = chartPointFromEvent(kind, svg, event);
       if (end && chartDrawState[kind].preview) chartDrawState[kind].preview.end = end;
@@ -2509,7 +2603,17 @@ document.querySelectorAll('.candlestick-chart').forEach((svg) => {
     redrawChart(kind);
   });
   const finishDrag = (event, cancelled = false) => {
-    if (dragStart?.mode === 'trendline') {
+    if (dragStart?.mode === 'freehand') {
+      const drawState = chartDrawState[kind];
+      const mark = drawState.freehandPreview;
+      if (!cancelled && mark?.points.length > 1) {
+        drawState.freehandMarks.push(mark);
+        showNotice('Drawing added to the spot, CE and PE charts at the matching times.');
+      }
+      drawState.freehandPreview = null;
+      updateSpotMarkupTools();
+      redrawChart('spot-intraday');
+    } else if (dragStart?.mode === 'trendline') {
       const drawState = chartDrawState[kind];
       const end = event ? chartPointFromEvent(kind, svg, event) : null;
       if (!cancelled && end && Math.hypot(event.clientX - dragStart.x, event.clientY - dragStart.y) >= 4) {
@@ -2553,6 +2657,7 @@ document.querySelectorAll('.candlestick-chart').forEach((svg) => {
 });
 
 ['call', 'put', 'spot-intraday', 'spot-daily'].forEach(updateChartTools);
+updateSpotMarkupTools();
 
 document.querySelector('#connect-data').addEventListener('click', startLogin);
 document.querySelector('#disconnect-data').addEventListener('click', disconnectFyers);

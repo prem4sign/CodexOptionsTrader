@@ -132,7 +132,9 @@
 .workspace-panel input::placeholder{color:#72839a}
 .workspace-panel .button{height:30px;padding:0 9px;font-size:9px}
 .workspace-panel .button:disabled{opacity:.45}
+.spot-markup-tools{display:flex;align-items:center;gap:5px;margin-top:2px}.spot-markup-tools .spot-pencil-button{width:30px;padding:0;font-size:15px;line-height:1}.spot-pencil-button.is-active{background:#203852;border-color:#6b8fb8;color:#f0f6ff}.freehand-mark-layer{pointer-events:none}.freehand-mark{fill:none;stroke:#f472b6;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke;opacity:.94}
 :root[data-theme="light"] .workspace-panel>label{color:#65758a}
+:root[data-theme="light"] .spot-pencil-button.is-active{background:#e9f1fa;border-color:#7196c1;color:#2c527a}:root[data-theme="light"] .freehand-mark{stroke:#d63384}
 :root[data-theme="light"] .workspace-panel input,:root[data-theme="light"] .workspace-panel select{background:#fff;border-color:#cbd6e2;color:#27384d}
 @media(max-width:640px){.overview-controls{min-width:0}.workspace-panel{grid-column:1/-1;width:100%}}
 .chart-latest-button{position:absolute;right:calc(11% + 8px);bottom:31px;z-index:4;display:grid;place-items:center;width:28px;height:28px;padding:0;border:1px solid #52657d;border-radius:6px;background:rgba(20,32,49,.94);color:#dce8f6;font-size:17px;line-height:1;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.18)}
@@ -181,3 +183,4 @@
   .overview-controls select{width:100%;min-width:0}
   .chart-stack{grid-template-columns:minmax(0,1fr)}
 }
+.candlestick-chart.pencil-mode{cursor:crosshair;touch-action:none}
