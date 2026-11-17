@@ -282,11 +282,7 @@ function candleTouchesEma(candle, emaValue) {
 }
 
 function candleRetouchesEmaInTrend(candle, emaValue) {
-  if (!candleTouchesEma(candle, emaValue)) return false;
-  const open = Number(candle[1]);
-  const close = Number(candle[4]);
-  return (open > emaValue && close >= emaValue)
-    || (open < emaValue && close <= emaValue);
+  return candleTouchesEma(candle, emaValue);
 }
 
 function candleOpensOnEmaSide(candle, emaValue, direction) {
@@ -298,7 +294,12 @@ function candleOpensOnEmaSide(candle, emaValue, direction) {
 function isRetouchStart(candles, emaValues, index) {
   if (!candleRetouchesEmaInTrend(candles[index], emaValues[index])) return false;
   if (index === 0) return false;
-  const direction = Number(candles[index][1]) > emaValues[index] ? 'bullish' : 'bearish';
+  const previousOpen = Number(candles[index - 1][1]);
+  const previousEma = emaValues[index - 1];
+  const direction = previousOpen > previousEma ? 'bullish'
+    : previousOpen < previousEma ? 'bearish'
+      : null;
+  if (!direction) return false;
   if (!candleOpensOnEmaSide(candles[index - 1], emaValues[index - 1], direction)) return false;
   return !candleRetouchesEmaInTrend(candles[index - 1], emaValues[index - 1]);
 }
@@ -311,13 +312,20 @@ function formatEmaRetouchTime(timestamp, interval) {
     : { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' }).format(date);
 }
 
-function emaRetouchPeriod() {
+function normalizeRetouchPeriods(periods) {
+  const valid = [...new Set((Array.isArray(periods) ? periods : [periods])
+    .map(Number)
+    .filter((period) => [50, 100, 200].includes(period)))];
+  return valid.length ? valid : [200];
+}
+
+function emaRetouchPeriods() {
   try {
     const settings = JSON.parse(localStorage.getItem(settingsStorageKey) || 'null');
-    const period = Number(settings?.retouchEmaPeriod);
-    return [50, 100, 200].includes(period) ? period : 200;
+    const savedPeriods = settings?.retouchEmaPeriods ?? settings?.retouchEmaPeriod ?? [200];
+    return normalizeRetouchPeriods(savedPeriods);
   } catch {
-    return 200;
+    return [200];
   }
 }
 
@@ -331,37 +339,38 @@ function retouchAlertInterval() {
   }
 }
 
-function retouchEventsForCandles(candles, period) {
-  if (!Array.isArray(candles) || candles.length < period) return [];
+function retouchEventsForCandles(candles, periods) {
+  if (!Array.isArray(candles) || !candles.length) return [];
   const uniqueCandles = uniqueCandlesByTimestamp(candles);
-  const emaValues = calculateEma(uniqueCandles.map((candle) => Number(candle[4])), period);
-  return uniqueCandles.flatMap((candle, index) => {
-    return isRetouchStart(uniqueCandles, emaValues, index)
+  const selectedPeriods = normalizeRetouchPeriods(periods);
+  return selectedPeriods.flatMap((period) => {
+    if (uniqueCandles.length < period) return [];
+    const emaValues = calculateEma(uniqueCandles.map((candle) => Number(candle[4])), period);
+    return uniqueCandles.flatMap((candle, index) => isRetouchStart(uniqueCandles, emaValues, index)
       ? [{ timestamp: Number(candle[0]), period }]
-      : [];
+      : []);
   });
 }
 
 function getSpotRetouchEvents() {
   const spotData = chartData['spot-intraday'];
   const spotState = chartDrawState['spot-intraday'];
-  const period = emaRetouchPeriod();
   if (!spotData || !spotState.emaVisible) return [];
-  const emaSettings = spotState.emas.find((ema) => Number(ema.period) === period);
-  if (!emaSettings?.enabled) return [];
-  const sourceTimeframe = emaSettings.timeframe || 'chart';
-  const resolution = sourceTimeframe === 'chart' ? spotData.interval : sourceTimeframe;
-  const sourceCandles = resolution === spotData.interval
-    ? spotData.candles
-    : emaHistoryCache.get(emaHistoryKey(spotData.symbol, resolution))?.candles;
-  if (!sourceCandles?.length) return [];
-  const emaValues = projectEmaToChart(sourceCandles, spotData.candles, period, resolution, spotData.interval);
   const events = [];
-  for (let index = 0; index < spotData.candles.length; index += 1) {
-    const candle = spotData.candles[index];
-    const emaValue = emaValues[index];
-    if (isRetouchStart(spotData.candles, emaValues, index)) {
-      events.push({ timestamp: candle[0], period });
+  for (const period of emaRetouchPeriods()) {
+    const emaSettings = spotState.emas.find((ema) => Number(ema.period) === period);
+    if (!emaSettings?.enabled) continue;
+    const sourceTimeframe = emaSettings.timeframe || 'chart';
+    const resolution = sourceTimeframe === 'chart' ? spotData.interval : sourceTimeframe;
+    const sourceCandles = resolution === spotData.interval
+      ? spotData.candles
+      : emaHistoryCache.get(emaHistoryKey(spotData.symbol, resolution))?.candles;
+    if (!sourceCandles?.length) continue;
+    const emaValues = projectEmaToChart(sourceCandles, spotData.candles, period, resolution, spotData.interval);
+    for (let index = 0; index < spotData.candles.length; index += 1) {
+      if (isRetouchStart(spotData.candles, emaValues, index)) {
+        events.push({ timestamp: spotData.candles[index][0], period });
+      }
     }
   }
   return events;
@@ -466,8 +475,8 @@ function playRetouchChime() {
 }
 
 function observeSpotRetouches(events, spotData, alertInterval = spotData.interval) {
-  const period = emaRetouchPeriod();
-  const context = `${spotData.symbol}|${alertInterval}|${period}`;
+  const periods = emaRetouchPeriods();
+  const context = `${spotData.symbol}|${alertInterval}|${periods.join(',')}`;
   const currentTimestamps = new Set(events.map((event) => event.timestamp));
   if (context !== retouchSoundContext) {
     retouchSoundContext = context;
@@ -489,13 +498,13 @@ async function refreshSpotCandlesForRetouch() {
   const kind = 'spot-intraday';
   const data = chartData[kind];
   const state = chartDrawState[kind];
-  const period = emaRetouchPeriod();
-  const ema = state.emas.find((item) => Number(item.period) === period);
+  const periods = emaRetouchPeriods();
+  const enabledEma = state.emas.some((item) => periods.includes(Number(item.period)) && item.enabled);
   const alertInterval = retouchAlertInterval();
   if (alertInterval === '1D' && Date.now() - lastDailyRetouchPollAt < 300000) return;
   if (retouchPollInProgress || document.visibilityState !== 'visible'
     || !document.querySelector('#connection-state .status-dot')?.classList.contains('connected')
-    || !data || !state.emaVisible || !ema?.enabled) return;
+    || !data || !state.emaVisible || !enabledEma) return;
 
   retouchPollInProgress = true;
   const { symbol } = data;
@@ -503,9 +512,10 @@ async function refreshSpotCandlesForRetouch() {
     const query = new URLSearchParams({ symbol, resolution: alertInterval, include_partial: '1', retouch_alert: '1' });
     const payload = await fetchApi(`/api/market/history?${query}`);
     if (alertInterval === '1D') lastDailyRetouchPollAt = Date.now();
-    if (series[kind].symbol !== symbol || retouchAlertInterval() !== alertInterval) return;
+    if (series[kind].symbol !== symbol || retouchAlertInterval() !== alertInterval
+      || emaRetouchPeriods().join(',') !== periods.join(',')) return;
     const candles = payload.candles || [];
-    const events = retouchEventsForCandles(candles, period);
+    const events = retouchEventsForCandles(candles, periods);
     observeSpotRetouches(events, { symbol, interval: alertInterval, candles }, alertInterval);
     if (alertInterval === data.interval) {
       if (series[kind].interval === alertInterval) {
@@ -750,45 +760,46 @@ function drawCandles(kind, payload, symbol, interval) {
     }
   }
 
-  const retouchPeriod = emaRetouchPeriod();
-  const retouchEmaIndex = drawState.emas.findIndex((ema) => Number(ema.period) === retouchPeriod);
-  const retouchEma = emaValuesByIndex.get(retouchEmaIndex);
-  if (drawState.emaVisible && retouchEma?.enabled
-    && kind === 'spot-intraday') {
+  if (drawState.emaVisible && kind === 'spot-intraday') {
     let markerNumber = 0;
     const visibleEnd = Math.min(view.end, allCandles.length);
-    for (let candleIndex = firstDataIndex; candleIndex < visibleEnd; candleIndex += 1) {
-      const candle = allCandles[candleIndex];
-      const emaValue = retouchEma.allValues[candleIndex];
-      if (!isRetouchStart(allCandles, retouchEma.allValues, candleIndex)) continue;
-      const visibleSlot = candleIndex - startIndex;
-      if (visibleSlot < 0 || visibleSlot >= view.window) continue;
-      const x = left + (visibleSlot + 0.5) * gap;
-      const markerY = y(emaValue);
-      if (markerY < top || markerY > bottom) continue;
-      const marker = makeSvgElement('g', {
-        class: 'ema-retouch-marker',
-        'aria-label': `${retouchPeriod} EMA touch at ${formatXAxisLabel(candle[0], interval)}`,
-      });
-      const title = makeSvgElement('title', {});
-      title.textContent = `${retouchPeriod} EMA touch · ${formatXAxisLabel(candle[0], interval)}`;
-      marker.append(title);
-      marker.append(makeSvgElement('path', {
-        d: `M${(x - 3).toFixed(2)},${(markerY - 1).toFixed(2)} l2.5,3 l5,-6`,
-        class: 'ema-retouch-tick',
-      }));
-      const alignRight = x > right - 38;
-      const alternateLabel = markerNumber % 2 === 1;
-      const label = makeSvgElement('text', {
-        x: (x + (alignRight ? -5 : 7)).toFixed(2),
-        y: (markerY < top + 15 || alternateLabel ? markerY + 11 : markerY - 6).toFixed(2),
-        class: 'ema-retouch-time',
-        'text-anchor': alignRight ? 'end' : 'start',
-      });
-      label.textContent = formatEmaRetouchTime(candle[0], interval);
-      marker.append(label);
-      retouchGroup.append(marker);
-      markerNumber += 1;
+    for (const retouchPeriod of emaRetouchPeriods()) {
+      const retouchEmaIndex = drawState.emas.findIndex((ema) => Number(ema.period) === retouchPeriod);
+      const retouchEma = emaValuesByIndex.get(retouchEmaIndex);
+      if (!retouchEma?.enabled) continue;
+      for (let candleIndex = firstDataIndex; candleIndex < visibleEnd; candleIndex += 1) {
+        const candle = allCandles[candleIndex];
+        const emaValue = retouchEma.allValues[candleIndex];
+        if (!isRetouchStart(allCandles, retouchEma.allValues, candleIndex)) continue;
+        const visibleSlot = candleIndex - startIndex;
+        if (visibleSlot < 0 || visibleSlot >= view.window) continue;
+        const x = left + (visibleSlot + 0.5) * gap;
+        const markerY = y(emaValue);
+        if (markerY < top || markerY > bottom) continue;
+        const marker = makeSvgElement('g', {
+          class: 'ema-retouch-marker',
+          'aria-label': `${retouchPeriod} EMA touch at ${formatXAxisLabel(candle[0], interval)}`,
+        });
+        const title = makeSvgElement('title', {});
+        title.textContent = `${retouchPeriod} EMA touch · ${formatXAxisLabel(candle[0], interval)}`;
+        marker.append(title);
+        marker.append(makeSvgElement('path', {
+          d: `M${(x - 3).toFixed(2)},${(markerY - 1).toFixed(2)} l2.5,3 l5,-6`,
+          class: 'ema-retouch-tick',
+        }));
+        const alignRight = x > right - 38;
+        const alternateLabel = markerNumber % 2 === 1;
+        const label = makeSvgElement('text', {
+          x: (x + (alignRight ? -5 : 7)).toFixed(2),
+          y: (markerY < top + 15 || alternateLabel ? markerY + 11 : markerY - 6).toFixed(2),
+          class: 'ema-retouch-time',
+          'text-anchor': alignRight ? 'end' : 'start',
+        });
+        label.textContent = `${retouchPeriod} ${formatEmaRetouchTime(candle[0], interval)}`;
+        marker.append(label);
+        retouchGroup.append(marker);
+        markerNumber += 1;
+      }
     }
   }
 
@@ -861,7 +872,7 @@ function drawCandles(kind, payload, symbol, interval) {
         class: 'ema-retouch-time',
         'text-anchor': alignRight ? 'end' : 'start',
       });
-      label.textContent = `${formatEmaRetouchTime(event.timestamp, interval)} (${optionPriceLabel})`;
+      label.textContent = `${event.period} ${formatEmaRetouchTime(event.timestamp, interval)} (${optionPriceLabel})`;
       marker.append(label);
       retouchGroup.append(marker);
       markerNumber += 1;
@@ -1427,13 +1438,15 @@ const settingsFields = {
   lots: document.querySelector('#lots-input'),
   profit: document.querySelector('#profit-input'),
   stopLoss: document.querySelector('#stop-loss-input'),
-  retouchEmaPeriod: document.querySelector('#retouch-ema-input'),
   retouchAlertInterval: document.querySelector('#retouch-timeframe-input'),
 };
+const retouchEmaCheckboxes = [...document.querySelectorAll('input[name="retouchEmaPeriods"]')];
 
 try {
   const savedSettings = JSON.parse(localStorage.getItem(settingsStorageKey) || 'null');
   if (savedSettings && typeof savedSettings === 'object') {
+    const savedRetouchPeriods = normalizeRetouchPeriods(savedSettings.retouchEmaPeriods ?? savedSettings.retouchEmaPeriod ?? [200]);
+    retouchEmaCheckboxes.forEach((checkbox) => { checkbox.checked = savedRetouchPeriods.includes(Number(checkbox.value)); });
     for (const [key, field] of Object.entries(settingsFields)) {
       if (savedSettings[key] === undefined) continue;
       if (key === 'lots') {
@@ -1456,6 +1469,9 @@ settingsForm.addEventListener('submit', (event) => {
   const settings = Object.fromEntries(
     Object.entries(settingsFields).map(([key, field]) => [key, key === 'lots' || key === 'retouchAlertInterval' ? field.value.trim() : Number(field.value)]),
   );
+  settings.retouchEmaPeriods = retouchEmaCheckboxes
+    .filter((checkbox) => checkbox.checked)
+    .map((checkbox) => Number(checkbox.value));
   const lotsText = settings.lots;
   const percentageLots = /^\d+(?:\.\d+)?%$/.test(lotsText);
   const fixedLots = /^\d+$/.test(lotsText);
@@ -1466,10 +1482,8 @@ settingsForm.addEventListener('submit', (event) => {
     settingsFields.lots.setCustomValidity('');
     return;
   }
-  if (![50, 100, 200].includes(settings.retouchEmaPeriod)) {
-    settingsFields.retouchEmaPeriod.setCustomValidity('Select the 50 EMA, 100 EMA, or 200 EMA.');
-    settingsFields.retouchEmaPeriod.reportValidity();
-    settingsFields.retouchEmaPeriod.setCustomValidity('');
+  if (!settings.retouchEmaPeriods.length) {
+    settingsStatus.textContent = 'Select at least one EMA for re-touch markers.';
     return;
   }
   if (!['1', '5', '15', '30', '60', '1D'].includes(settings.retouchAlertInterval)) {
