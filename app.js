@@ -436,6 +436,11 @@ function getFirstEmaRetouchAfterCrossEvents() {
 const retouchChime = new Audio('/DING%20DONG.mp3');
 retouchChime.preload = 'auto';
 let retouchChimeUnlocked = false;
+let retouchAlarmActive = false;
+let pendingRetouchAlerts = [];
+const retouchAlertDialog = document.querySelector('#retouch-alert-dialog');
+const retouchAlertEvents = document.querySelector('#retouch-alert-events');
+const retouchAlertOk = document.querySelector('#retouch-alert-ok');
 let retouchSoundContext = '';
 let previousSpotRetouches = new Set();
 let retouchPollInProgress = false;
@@ -459,25 +464,43 @@ function unlockRetouchChime() {
 
 document.addEventListener('pointerdown', unlockRetouchChime, { once: true });
 
-function playRetouchChime() {
-  let remaining = 3;
-  const playNext = () => {
-    if (remaining <= 0) {
-      retouchChime.onended = null;
-      return;
-    }
-    remaining -= 1;
-    retouchChime.currentTime = 0;
-    retouchChime.onended = playNext;
-    retouchChime.play().catch(() => { retouchChime.onended = null; });
-  };
-  playNext();
+function renderPendingRetouchAlerts() {
+  retouchAlertEvents.replaceChildren(...pendingRetouchAlerts.map((event) => {
+    const item = document.createElement('li');
+    item.textContent = `${event.period} EMA · ${formatXAxisLabel(event.timestamp, event.interval)}`;
+    return item;
+  }));
 }
+
+function showRetouchAlert(events, interval) {
+  const newAlerts = events.map((event) => ({ ...event, interval }));
+  const knownAlerts = new Set(pendingRetouchAlerts.map((event) => `${event.period}|${event.timestamp}`));
+  pendingRetouchAlerts.push(...newAlerts.filter((event) => !knownAlerts.has(`${event.period}|${event.timestamp}`)));
+  renderPendingRetouchAlerts();
+  if (!retouchAlertDialog.open) retouchAlertDialog.showModal();
+  if (!retouchAlarmActive) {
+    retouchAlarmActive = true;
+    retouchChime.loop = true;
+    retouchChime.currentTime = 0;
+    retouchChime.play().catch(() => {});
+  }
+  retouchAlertOk.focus();
+}
+
+retouchAlertDialog.addEventListener('cancel', (event) => event.preventDefault());
+retouchAlertOk.addEventListener('click', () => {
+  retouchAlarmActive = false;
+  retouchChime.pause();
+  retouchChime.currentTime = 0;
+  retouchChime.loop = false;
+  pendingRetouchAlerts = [];
+  retouchAlertDialog.close();
+});
 
 function observeSpotRetouches(events, spotData, alertInterval = spotData.interval) {
   const periods = emaRetouchPeriods();
   const context = `${spotData.symbol}|${alertInterval}|${periods.join(',')}`;
-  const currentTimestamps = new Set(events.map((event) => event.timestamp));
+  const currentTimestamps = new Set(events.map((event) => `${event.period}|${event.timestamp}`));
   if (context !== retouchSoundContext) {
     retouchSoundContext = context;
     previousSpotRetouches = currentTimestamps;
@@ -487,11 +510,11 @@ function observeSpotRetouches(events, spotData, alertInterval = spotData.interva
   const barSeconds = ['1D', '1W', '1M'].includes(alertInterval)
     ? 86400 : Number(alertInterval) * 60;
   const recentAfter = lastTimestamp - Math.max(1800, barSeconds * 2);
-  const isNewRecentTouch = events.some((event) => (
-    event.timestamp >= recentAfter && !previousSpotRetouches.has(event.timestamp)
+  const newRecentTouches = events.filter((event) => (
+    event.timestamp >= recentAfter && !previousSpotRetouches.has(`${event.period}|${event.timestamp}`)
   ));
   previousSpotRetouches = currentTimestamps;
-  if (isNewRecentTouch) playRetouchChime();
+  if (newRecentTouches.length) showRetouchAlert(newRecentTouches, alertInterval);
 }
 
 async function refreshSpotCandlesForRetouch() {

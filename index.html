@@ -176,6 +176,14 @@
         <p class="news-updated" id="news-updated" aria-live="polite"></p>
       </section>
     </main>
+    <dialog class="retouch-alert-dialog" id="retouch-alert-dialog" aria-labelledby="retouch-alert-title" aria-describedby="retouch-alert-description">
+      <section class="retouch-alert-panel">
+        <h2 id="retouch-alert-title">Spot chart EMA retouch</h2>
+        <p id="retouch-alert-description">A selected EMA was retouched.</p>
+        <ul id="retouch-alert-events" aria-live="assertive"></ul>
+        <button class="button button-primary" id="retouch-alert-ok" type="button">OK</button>
+      </section>
+    </dialog>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script src="/app.js"></script>
   </body>
