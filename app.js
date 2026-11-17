@@ -289,9 +289,18 @@ function candleRetouchesEmaInTrend(candle, emaValue) {
     || (open < emaValue && close <= emaValue);
 }
 
+function candleOpensOnEmaSide(candle, emaValue, direction) {
+  if (!candle || !Number.isFinite(emaValue)) return false;
+  const open = Number(candle[1]);
+  return direction === 'bullish' ? open > emaValue : open < emaValue;
+}
+
 function isRetouchStart(candles, emaValues, index) {
   if (!candleRetouchesEmaInTrend(candles[index], emaValues[index])) return false;
-  return index === 0 || !candleRetouchesEmaInTrend(candles[index - 1], emaValues[index - 1]);
+  if (index === 0) return false;
+  const direction = Number(candles[index][1]) > emaValues[index] ? 'bullish' : 'bearish';
+  if (!candleOpensOnEmaSide(candles[index - 1], emaValues[index - 1], direction)) return false;
+  return !candleRetouchesEmaInTrend(candles[index - 1], emaValues[index - 1]);
 }
 
 function formatEmaRetouchTime(timestamp, interval) {
@@ -400,9 +409,8 @@ function getFirstEmaRetouchAfterCrossEvents() {
     const candle = candles[index];
     const emaValue = secondValues[index];
     const directionalRetouch = candleTouchesEma(candle, emaValue)
-      && (pendingDirection === 'bullish'
-        ? Number(candle[1]) > emaValue
-        : Number(candle[1]) < emaValue);
+      && candleOpensOnEmaSide(candle, emaValue, pendingDirection)
+      && candleOpensOnEmaSide(candles[index - 1], secondValues[index - 1], pendingDirection);
     if (!directionalRetouch) continue;
 
     events.push({
@@ -829,12 +837,13 @@ function drawCandles(kind, payload, symbol, interval) {
       const visibleSlot = candleIndex - startIndex;
       if (visibleSlot < 0 || visibleSlot >= view.window) continue;
       const x = left + (visibleSlot + 0.5) * gap;
+      const optionPriceLabel = `₹${formatNumber(candle[4])}`;
       const marker = makeSvgElement('g', {
         class: 'ema-retouch-option-marker',
-        'aria-label': `Spot ${event.period} EMA touch at ${formatXAxisLabel(event.timestamp, interval)}`,
+        'aria-label': `Spot ${event.period} EMA touch at ${formatXAxisLabel(event.timestamp, interval)} · option close ${optionPriceLabel}`,
       });
       const title = makeSvgElement('title', {});
-      title.textContent = `Spot ${event.period} EMA touch · ${formatXAxisLabel(event.timestamp, interval)}`;
+      title.textContent = `Spot ${event.period} EMA touch · ${formatXAxisLabel(event.timestamp, interval)} · option close ${optionPriceLabel}`;
       marker.append(title);
       marker.append(makeSvgElement('line', {
         x1: x.toFixed(2), x2: x.toFixed(2), y1: top.toFixed(2), y2: bottom.toFixed(2),
@@ -852,7 +861,7 @@ function drawCandles(kind, payload, symbol, interval) {
         class: 'ema-retouch-time',
         'text-anchor': alignRight ? 'end' : 'start',
       });
-      label.textContent = formatEmaRetouchTime(event.timestamp, interval);
+      label.textContent = `${formatEmaRetouchTime(event.timestamp, interval)} (${optionPriceLabel})`;
       marker.append(label);
       retouchGroup.append(marker);
       markerNumber += 1;
@@ -866,12 +875,13 @@ function drawCandles(kind, payload, symbol, interval) {
       const visibleSlot = candleIndex - startIndex;
       if (visibleSlot < 0 || visibleSlot >= view.window) continue;
       const x = left + (visibleSlot + 0.5) * gap;
+      const optionPriceLabel = `₹${formatNumber(candle[4])}`;
       const marker = makeSvgElement('g', {
         class: 'ema-cross-retouch-option-marker',
-        'aria-label': `First spot EMA ${event.period} retouch after ${event.direction} crossover at ${formatXAxisLabel(event.timestamp, interval)}`,
+        'aria-label': `First spot EMA ${event.period} retouch after ${event.direction} crossover at ${formatXAxisLabel(event.timestamp, interval)} · option close ${optionPriceLabel}`,
       });
       const title = makeSvgElement('title', {});
-      title.textContent = `First spot EMA ${event.period} retouch after ${event.direction} crossover · ${formatXAxisLabel(event.timestamp, interval)}`;
+      title.textContent = `First spot EMA ${event.period} retouch after ${event.direction} crossover · ${formatXAxisLabel(event.timestamp, interval)} · option close ${optionPriceLabel}`;
       marker.append(title);
       marker.append(makeSvgElement('line', {
         x1: x.toFixed(2), x2: x.toFixed(2), y1: top.toFixed(2), y2: bottom.toFixed(2),
@@ -885,7 +895,7 @@ function drawCandles(kind, payload, symbol, interval) {
       const label = makeSvgElement('text', {
         x: (x + 6).toFixed(2), y: (bottom - 8).toFixed(2), class: 'ema-cross-retouch-time',
       });
-      label.textContent = formatEmaRetouchTime(event.timestamp, interval);
+      label.textContent = `${formatEmaRetouchTime(event.timestamp, interval)} (${optionPriceLabel})`;
       marker.append(label);
       retouchGroup.append(marker);
     }
