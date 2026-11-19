@@ -27,21 +27,23 @@ try {
 } catch { /* The page can still load a fresh verdict without browser storage. */ }
 
 const series = {
-  call: { symbol: '', interval: '5' },
-  put: { symbol: '', interval: '5' },
-  'spot-intraday': { symbol: UNDERLYINGS[currentUnderlying].symbol, interval: '5' },
+  call: { symbol: '', interval: '15' },
+  put: { symbol: '', interval: '15' },
+  'spot-intraday': { symbol: UNDERLYINGS[currentUnderlying].symbol, interval: '15' },
   'spot-daily': { symbol: UNDERLYINGS[currentUnderlying].symbol, interval: '1D' },
 };
 const chartData = {};
 const chartViews = {};
 const seriesRequestIds = {};
 const workspacesStorageKey = 'options-desk-chart-workspaces';
+const lastWorkspaceStorageKey = 'options-desk-last-workspace';
 const defaultEmaSettings = [
   { period: 50, color: '#f59e0b', enabled: true, timeframe: '5' },
   { period: 100, color: '#3b82f6', enabled: true, timeframe: '5' },
   { period: 200, color: '#ffffff', enabled: true, timeframe: '5' },
   { period: 200, color: '#a78bfa', enabled: true, timeframe: '15' },
 ];
+const defaultSupertrendSettings = { enabled: true, atrLength: 10, factor: 3 };
 const emaHistoryCache = new Map();
 const emaHistoryRequests = new Map();
 const emaTimeframeOptions = [
@@ -49,8 +51,10 @@ const emaTimeframeOptions = [
   ['30', '30m'], ['60', '1h'], ['1D', '1D'],
 ];
 const chartDrawState = Object.fromEntries(['call', 'put', 'spot-intraday', 'spot-daily'].map((kind) => [kind, {
-  emaVisible: true,
+  emaVisible: false,
   emas: defaultEmaSettings.map((ema) => ({ ...ema })),
+  supertrend: { ...defaultSupertrendSettings },
+  zones: { supply: true, demand: true },
   drawTrendline: false,
   extendTrendlineRight: true,
   trendlines: [],
@@ -271,6 +275,232 @@ function calculateEma(values, period) {
   });
 }
 
+function calculateSupertrend(candles, atrLength, factor) {
+  const length = Number(atrLength);
+  const multiplier = Number(factor);
+  const values = Array(candles.length).fill(NaN);
+  const uptrend = Array(candles.length).fill(false);
+  if (!Number.isInteger(length) || length < 1 || !Number.isFinite(multiplier) || multiplier <= 0
+    || candles.length < length) return { values, uptrend };
+
+  const trueRanges = candles.map((candle, index) => {
+    const high = Number(candle[2]);
+    const low = Number(candle[3]);
+    if (index === 0) return high - low;
+    const previousClose = Number(candles[index - 1][4]);
+    return Math.max(high - low, Math.abs(high - previousClose), Math.abs(low - previousClose));
+  });
+  const atrValues = Array(candles.length).fill(NaN);
+  let initialRangeTotal = 0;
+  for (let index = 0; index < candles.length; index += 1) {
+    if (index < length) {
+      initialRangeTotal += trueRanges[index];
+      if (index === length - 1) atrValues[index] = initialRangeTotal / length;
+    } else {
+      atrValues[index] = ((atrValues[index - 1] * (length - 1)) + trueRanges[index]) / length;
+    }
+  }
+
+  const finalUpper = Array(candles.length).fill(NaN);
+  const finalLower = Array(candles.length).fill(NaN);
+  for (let index = length - 1; index < candles.length; index += 1) {
+    const candle = candles[index];
+    const midpoint = (Number(candle[2]) + Number(candle[3])) / 2;
+    const basicUpper = midpoint + (multiplier * atrValues[index]);
+    const basicLower = midpoint - (multiplier * atrValues[index]);
+    if (index === length - 1) {
+      finalUpper[index] = basicUpper;
+      finalLower[index] = basicLower;
+      uptrend[index] = Number(candle[4]) >= midpoint;
+    } else {
+      const previousClose = Number(candles[index - 1][4]);
+      finalUpper[index] = basicUpper < finalUpper[index - 1] || previousClose > finalUpper[index - 1]
+        ? basicUpper : finalUpper[index - 1];
+      finalLower[index] = basicLower > finalLower[index - 1] || previousClose < finalLower[index - 1]
+        ? basicLower : finalLower[index - 1];
+      uptrend[index] = uptrend[index - 1]
+        ? Number(candle[4]) >= finalLower[index]
+        : Number(candle[4]) > finalUpper[index];
+    }
+    values[index] = uptrend[index] ? finalLower[index] : finalUpper[index];
+  }
+  return { values, uptrend };
+}
+
+function detectSupplyDemandZones(candles, currentPrice, indexOffset = 0) {
+  const pivotStrength = 3;
+  const zones = [];
+  if (candles.length < (pivotStrength * 2) + 1) return [];
+
+  const averageRangeAt = (index, length = 14) => {
+    const first = Math.max(0, index - length + 1);
+    let total = 0;
+    let count = 0;
+    for (let candleIndex = first; candleIndex <= index; candleIndex += 1) {
+      const candle = candles[candleIndex];
+      const previousClose = candleIndex > 0 ? Number(candles[candleIndex - 1][4]) : Number(candle[4]);
+      total += Math.max(
+        Number(candle[2]) - Number(candle[3]),
+        Math.abs(Number(candle[2]) - previousClose),
+        Math.abs(Number(candle[3]) - previousClose),
+      );
+      count += 1;
+    }
+    return count ? total / count : 0;
+  };
+
+  for (let index = pivotStrength; index < candles.length - pivotStrength; index += 1) {
+    const candle = candles[index];
+    const high = Number(candle[2]);
+    const low = Number(candle[3]);
+    let isPivotHigh = true;
+    let isPivotLow = true;
+    for (let offset = 1; offset <= pivotStrength; offset += 1) {
+      if (high < Number(candles[index - offset][2]) || high < Number(candles[index + offset][2])) isPivotHigh = false;
+      if (low > Number(candles[index - offset][3]) || low > Number(candles[index + offset][3])) isPivotLow = false;
+    }
+    const reactionCandles = candles.slice(index + 1, index + pivotStrength + 1);
+    if (isPivotHigh && candles.slice(index - pivotStrength, index + pivotStrength + 1)
+      .some((row, rowIndex) => rowIndex !== pivotStrength && Number(row[2]) < high)) {
+      const atr = averageRangeAt(index);
+      const bearishDeparture = reactionCandles.some((row) => Number(row[4]) < Number(row[1]))
+        && Math.min(...reactionCandles.map((row) => Number(row[4]))) <= high - (atr * 0.6);
+      if (bearishDeparture) {
+        const depth = Math.max(atr * 0.4, Math.abs(high) * 0.00015, 0.01);
+        const bodyHigh = Math.max(Number(candle[1]), Number(candle[4]));
+        zones.push({ type: 'supply', low: Math.min(bodyHigh, high - depth), high, startIndex: index, lastPivotIndex: index, touches: 1 });
+      }
+    }
+    if (isPivotLow && candles.slice(index - pivotStrength, index + pivotStrength + 1)
+      .some((row, rowIndex) => rowIndex !== pivotStrength && Number(row[3]) > low)) {
+      const atr = averageRangeAt(index);
+      const bullishDeparture = reactionCandles.some((row) => Number(row[4]) > Number(row[1]))
+        && Math.max(...reactionCandles.map((row) => Number(row[4]))) >= low + (atr * 0.6);
+      if (bullishDeparture) {
+        const depth = Math.max(atr * 0.4, Math.abs(low) * 0.00015, 0.01);
+        const bodyLow = Math.min(Number(candle[1]), Number(candle[4]));
+        zones.push({ type: 'demand', low, high: Math.max(bodyLow, low + depth), startIndex: index, lastPivotIndex: index, touches: 1 });
+      }
+    }
+  }
+
+  const clusteredZones = [];
+  for (const zone of zones) {
+    const midpoint = (zone.low + zone.high) / 2;
+    const tolerance = Math.max(averageRangeAt(zone.lastPivotIndex) * 0.45, Math.abs(midpoint) * 0.0002);
+    const match = clusteredZones.find((candidate) => {
+      if (candidate.type !== zone.type) return false;
+      const candidateMidpoint = (candidate.low + candidate.high) / 2;
+      return zone.low <= candidate.high + tolerance && zone.high >= candidate.low - tolerance
+        || Math.abs(midpoint - candidateMidpoint) <= tolerance;
+    });
+    if (match) {
+      match.low = Math.min(match.low, zone.low);
+      match.high = Math.max(match.high, zone.high);
+      match.startIndex = Math.min(match.startIndex, zone.startIndex);
+      match.lastPivotIndex = Math.max(match.lastPivotIndex, zone.lastPivotIndex);
+      match.touches += 1;
+    } else clusteredZones.push({ ...zone });
+  }
+
+  const activeZones = clusteredZones.filter((zone) => {
+    for (let index = zone.startIndex + 1; index < candles.length; index += 1) {
+      const close = Number(candles[index][4]);
+      if ((zone.type === 'supply' && close > zone.high) || (zone.type === 'demand' && close < zone.low)) return false;
+    }
+    return true;
+  });
+  const distanceToZone = (zone) => currentPrice < zone.low
+    ? zone.low - currentPrice
+    : currentPrice > zone.high ? currentPrice - zone.high : 0;
+  const rankZones = (type) => activeZones
+    .filter((zone) => zone.type === type
+      && (type === 'supply' ? zone.high >= currentPrice : zone.low <= currentPrice))
+    .sort((first, second) => distanceToZone(first) - distanceToZone(second)
+      || second.touches - first.touches || second.lastPivotIndex - first.lastPivotIndex);
+  return [...rankZones('supply'), ...rankZones('demand')].map((zone) => ({
+    ...zone,
+    startIndex: zone.startIndex + indexOffset,
+    lastPivotIndex: zone.lastPivotIndex + indexOffset,
+  }));
+}
+
+function previousTradingSessions(candles, sessionCount = 3) {
+  if (!candles.length) return { candles: [], startIndex: 0 };
+  const sessionStarts = [];
+  const todayInIst = Math.floor((Math.floor(Date.now() / 1000) + 19800) / 86400);
+  let previousSession = null;
+  for (let index = 0; index < candles.length; index += 1) {
+    const session = Math.floor((Number(candles[index][0]) + 19800) / 86400);
+    if (session < todayInIst && session !== previousSession) {
+      sessionStarts.push(index);
+      previousSession = session;
+    }
+  }
+  if (!sessionStarts.length) return { candles: [], startIndex: candles.length };
+  const firstPriorSessionIndex = sessionStarts[Math.max(0, sessionStarts.length - sessionCount)] || 0;
+  const firstTodayIndex = candles.findIndex((candle) => Math.floor((Number(candle[0]) + 19800) / 86400) >= todayInIst);
+  const finalPriorSessionEnd = firstTodayIndex >= 0 ? firstTodayIndex : candles.length;
+  return { candles: candles.slice(firstPriorSessionIndex, finalPriorSessionEnd), startIndex: firstPriorSessionIndex };
+}
+
+function supertrendStartEvents(candles, calculated) {
+  const events = [];
+  for (let index = 1; index < candles.length; index += 1) {
+    if (!Number.isFinite(calculated.values[index - 1]) || !Number.isFinite(calculated.values[index])
+      || calculated.uptrend[index - 1] === calculated.uptrend[index]) continue;
+    events.push({
+      timestamp: Number(candles[index][0]),
+      direction: calculated.uptrend[index] ? 'up' : 'down',
+      closePrice: Number(candles[index][4]),
+      index,
+    });
+  }
+  return events;
+}
+
+function getSavedProfitPoints() {
+  try {
+    const settings = JSON.parse(localStorage.getItem(settingsStorageKey) || 'null');
+    const points = Number(settings?.profit);
+    return Number.isFinite(points) && points > 0 ? points : null;
+  } catch {
+    return null;
+  }
+}
+
+function supertrendProfitEvents(candles, calculated) {
+  const profitPoints = getSavedProfitPoints();
+  if (!profitPoints || !candles.length) return [];
+  const events = [];
+  for (const start of supertrendStartEvents(candles, calculated)) {
+    const entryIndex = start.index;
+    const entryCandle = candles[entryIndex];
+    const entryPrice = Number(entryCandle[4]);
+    const targetPrice = start.direction === 'up' ? entryPrice + profitPoints : entryPrice - profitPoints;
+    if (targetPrice <= 0) continue;
+    for (let index = entryIndex + 1; index < candles.length; index += 1) {
+      const candle = candles[index];
+      const reached = start.direction === 'up'
+        ? Number(candle[2]) >= targetPrice
+        : Number(candle[3]) <= targetPrice;
+      if (!reached) continue;
+      events.push({
+        timestamp: Number(candle[0]),
+        index,
+        direction: start.direction,
+        startTimestamp: start.timestamp,
+        entryPrice,
+        targetPrice,
+        close: Number(candle[4]),
+      });
+      break;
+    }
+  }
+  events.sort((first, second) => first.timestamp - second.timestamp);
+  return events;
+}
+
 function uniqueCandlesByTimestamp(candles) {
   const byTimestamp = new Map();
   for (const candle of candles) byTimestamp.set(Number(candle[0]), candle);
@@ -436,6 +666,13 @@ function getFirstEmaRetouchAfterCrossEvents() {
 const retouchChime = new Audio('/DING%20DONG.mp3');
 retouchChime.preload = 'auto';
 let retouchChimeUnlocked = false;
+const supertrendChime = new Audio('/DING%20DONG.mp3');
+supertrendChime.preload = 'auto';
+let supertrendChimeUnlocked = false;
+let supertrendChimeRingsPending = 0;
+let supertrendChimePlaying = false;
+let observedSupertrendContext = '';
+let seenSupertrendTransitions = new Set();
 let retouchAlarmActive = false;
 let pendingRetouchAlerts = [];
 const retouchAlertDialog = document.querySelector('#retouch-alert-dialog');
@@ -447,18 +684,19 @@ let retouchPollInProgress = false;
 let lastDailyRetouchPollAt = 0;
 
 function unlockRetouchChime() {
-  if (retouchChimeUnlocked) return;
-  retouchChime.muted = true;
-  const attempt = retouchChime.play();
-  if (attempt?.then) {
-    attempt.then(() => {
-      retouchChime.pause();
-      retouchChime.currentTime = 0;
-      retouchChime.muted = false;
-      retouchChimeUnlocked = true;
-    }).catch(() => {
-      retouchChime.muted = false;
-    });
+  for (const [audio, unlocked] of [[retouchChime, retouchChimeUnlocked], [supertrendChime, supertrendChimeUnlocked]]) {
+    if (unlocked) continue;
+    audio.muted = true;
+    const attempt = audio.play();
+    if (attempt?.then) {
+      attempt.then(() => {
+        audio.pause();
+        audio.currentTime = 0;
+        audio.muted = false;
+        if (audio === retouchChime) retouchChimeUnlocked = true;
+        else supertrendChimeUnlocked = true;
+      }).catch(() => { audio.muted = false; });
+    }
   }
 }
 
@@ -497,6 +735,64 @@ retouchAlertOk.addEventListener('click', () => {
   retouchAlertDialog.close();
 });
 
+function playNextSupertrendChime() {
+  if (supertrendChimeRingsPending <= 0) {
+    supertrendChimePlaying = false;
+    supertrendChime.onended = null;
+    return;
+  }
+  supertrendChimeRingsPending -= 1;
+  supertrendChime.currentTime = 0;
+  supertrendChime.onended = playNextSupertrendChime;
+  supertrendChime.play().catch(() => {
+    supertrendChime.onended = null;
+    supertrendChimeRingsPending = 0;
+    supertrendChimePlaying = false;
+  });
+}
+
+function playSupertrendChime() {
+  supertrendChimeRingsPending += 3;
+  if (supertrendChimePlaying) return;
+  supertrendChimePlaying = true;
+  playNextSupertrendChime();
+}
+
+function observeSpotSupertrendTransitions(candles, symbol, interval, settings, calculated = null) {
+  if (!settings.enabled) {
+    observedSupertrendContext = '';
+    seenSupertrendTransitions = new Set();
+    return;
+  }
+  const context = `${symbol}|${interval}|${settings.atrLength}|${settings.factor}`;
+  const result = calculated || calculateSupertrend(candles, settings.atrLength, settings.factor);
+  const transitions = [];
+  for (let index = 1; index < candles.length; index += 1) {
+    if (!Number.isFinite(result.values[index - 1]) || !Number.isFinite(result.values[index])
+      || result.uptrend[index - 1] === result.uptrend[index]) continue;
+    const direction = result.uptrend[index] ? 'up' : 'down';
+    transitions.push({
+      key: `${Number(candles[index][0])}|${direction}`,
+      timestamp: Number(candles[index][0]),
+    });
+  }
+  const lastTimestamp = Number(candles[candles.length - 1]?.[0]) || 0;
+  const barSeconds = ['1D', '1W', '1M'].includes(interval) ? 86400 : Number(interval) * 60;
+  const recentAfter = lastTimestamp - Math.max(1800, barSeconds * 2);
+  const recentTransitions = transitions.filter((event) => event.timestamp >= recentAfter);
+  if (context !== observedSupertrendContext) {
+    observedSupertrendContext = context;
+    seenSupertrendTransitions = new Set(recentTransitions.map((event) => event.key));
+    return;
+  }
+  const newTransitions = recentTransitions.filter((event) => !seenSupertrendTransitions.has(event.key));
+  recentTransitions.forEach((event) => seenSupertrendTransitions.add(event.key));
+  if (seenSupertrendTransitions.size > 200) {
+    seenSupertrendTransitions = new Set(recentTransitions.map((event) => event.key));
+  }
+  for (const event of newTransitions) playSupertrendChime();
+}
+
 function observeSpotRetouches(events, spotData, alertInterval = spotData.interval) {
   const periods = emaRetouchPeriods();
   const context = `${spotData.symbol}|${alertInterval}|${periods.join(',')}`;
@@ -524,27 +820,53 @@ async function refreshSpotCandlesForRetouch() {
   const periods = emaRetouchPeriods();
   const enabledEma = state.emas.some((item) => periods.includes(Number(item.period)) && item.enabled);
   const alertInterval = retouchAlertInterval();
-  if (alertInterval === '1D' && Date.now() - lastDailyRetouchPollAt < 300000) return;
+  const dailyRetouchDue = alertInterval !== '1D' || Date.now() - lastDailyRetouchPollAt >= 300000;
+  const pollRetouches = state.emaVisible && enabledEma && dailyRetouchDue;
+  const pollSupertrend = state.supertrend?.enabled !== false;
   if (retouchPollInProgress || document.visibilityState !== 'visible'
     || !document.querySelector('#connection-state .status-dot')?.classList.contains('connected')
-    || !data || !state.emaVisible || !enabledEma) return;
+    || !data || (!pollRetouches && !pollSupertrend)) return;
 
   retouchPollInProgress = true;
   const { symbol } = data;
+  const chartInterval = data.interval;
+  const supertrendContext = `${symbol}|${chartInterval}|${state.supertrend?.atrLength}|${state.supertrend?.factor}`;
+  let chartPayload = null;
   try {
-    const query = new URLSearchParams({ symbol, resolution: alertInterval, include_partial: '1', retouch_alert: '1' });
-    const payload = await fetchApi(`/api/market/history?${query}`);
-    if (alertInterval === '1D') lastDailyRetouchPollAt = Date.now();
-    if (series[kind].symbol !== symbol || retouchAlertInterval() !== alertInterval
-      || emaRetouchPeriods().join(',') !== periods.join(',')) return;
-    const candles = payload.candles || [];
-    const events = retouchEventsForCandles(candles, periods);
-    observeSpotRetouches(events, { symbol, interval: alertInterval, candles }, alertInterval);
-    if (alertInterval === data.interval) {
-      if (series[kind].interval === alertInterval) {
-        drawCandles(kind, payload, symbol, alertInterval);
-        redrawOptionRetouchCharts();
+    if (pollRetouches) {
+      try {
+        const query = new URLSearchParams({ symbol, resolution: alertInterval, include_partial: '1', retouch_alert: '1' });
+        const retouchPayload = await fetchApi(`/api/market/history?${query}`);
+        if (alertInterval === '1D') lastDailyRetouchPollAt = Date.now();
+        const retouchSettingsStillMatch = series[kind].symbol === symbol
+          && retouchAlertInterval() === alertInterval
+          && emaRetouchPeriods().join(',') === periods.join(',')
+          && chartDrawState[kind].emaVisible;
+        if (retouchSettingsStillMatch) {
+          const candles = retouchPayload.candles || [];
+          const events = retouchEventsForCandles(candles, periods);
+          observeSpotRetouches(events, { symbol, interval: alertInterval, candles }, alertInterval);
+        }
+        if (alertInterval === chartInterval && series[kind].interval === chartInterval) {
+          chartPayload = retouchPayload;
+        }
+      } catch {
+        // Supertrend polling can continue even if the EMA retouch request fails.
       }
+    }
+    if (pollSupertrend && !chartPayload) {
+      const query = new URLSearchParams({ symbol, resolution: chartInterval, include_partial: '1' });
+      const supertrendPayload = await fetchApi(`/api/market/history?${query}`);
+      const latestSettings = chartDrawState[kind].supertrend || defaultSupertrendSettings;
+      const latestContext = `${series[kind].symbol}|${series[kind].interval}|${latestSettings.atrLength}|${latestSettings.factor}`;
+      if (latestContext === supertrendContext && latestSettings.enabled) chartPayload = supertrendPayload;
+    }
+    const latestSettings = chartDrawState[kind].supertrend || defaultSupertrendSettings;
+    const latestContext = `${series[kind].symbol}|${series[kind].interval}|${latestSettings.atrLength}|${latestSettings.factor}`;
+    if (chartPayload && series[kind].symbol === symbol && series[kind].interval === chartInterval
+      && (!pollSupertrend || latestContext === supertrendContext)) {
+      drawCandles(kind, chartPayload, symbol, chartInterval);
+      redrawOptionRetouchCharts();
     }
   } catch {
     // Keep the last chart visible; the next poll can retry after a transient API error.
@@ -624,7 +946,47 @@ function nearestCandleIndex(candles, timestamp) {
   return timestamp - candles[high][0] <= candles[low][0] - timestamp ? high : low;
 }
 
+function bindCandleTooltip(kind) {
+  const svg = document.querySelector(`#chart-${kind}`);
+  if (svg.dataset.candleTooltipBound) return;
+  svg.dataset.candleTooltipBound = 'true';
+  const chartBody = svg.closest('.chart-body');
+  const tooltip = document.createElement('div');
+  tooltip.className = 'chart-hover-tooltip';
+  tooltip.hidden = true;
+  chartBody.append(tooltip);
+
+  const hideTooltip = () => { tooltip.hidden = true; };
+  svg.addEventListener('pointermove', (event) => {
+    if (event.pointerType === 'touch') return;
+    const candle = event.target.closest?.('[data-candle-time]');
+    if (!candle) {
+      hideTooltip();
+      return;
+    }
+    const timestamp = Number(candle.dataset.candleTime);
+    const close = Number(candle.dataset.candleClose);
+    const interval = chartData[kind]?.interval || series[kind].interval;
+    const time = document.createElement('span');
+    time.textContent = formatXAxisLabel(timestamp, interval);
+    const price = document.createElement('strong');
+    price.textContent = `Close ₹${formatNumber(close)}`;
+    tooltip.replaceChildren(time, price);
+    tooltip.hidden = false;
+
+    const bodyBounds = chartBody.getBoundingClientRect();
+    const left = Math.max(6, Math.min(event.clientX - bodyBounds.left + 12, bodyBounds.width - tooltip.offsetWidth - 6));
+    const top = Math.max(6, Math.min(event.clientY - bodyBounds.top - tooltip.offsetHeight - 10, bodyBounds.height - tooltip.offsetHeight - 6));
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+  });
+  svg.addEventListener('pointerleave', hideTooltip);
+}
+
 function drawCandles(kind, payload, symbol, interval) {
+  bindCandleTooltip(kind);
+  const existingTooltip = document.querySelector(`[data-chart-card="${kind}"] .chart-hover-tooltip`);
+  if (existingTooltip) existingTooltip.hidden = true;
   const raw = payload.candles || payload.data?.candles || [];
   const allCandles = uniqueCandlesByTimestamp(raw
     .filter((row) => Array.isArray(row) && row.length >= 5 && row.slice(0, 5).every((value) => Number.isFinite(Number(value))))
@@ -649,9 +1011,27 @@ function drawCandles(kind, payload, symbol, interval) {
   const startIndex = view.end - view.window;
   const firstDataIndex = Math.max(0, startIndex);
   const candles = allCandles.slice(firstDataIndex, Math.min(view.end, allCandles.length));
+  const supertrendSettings = drawState.supertrend || defaultSupertrendSettings;
+  const supertrend = calculateSupertrend(allCandles, supertrendSettings.atrLength, supertrendSettings.factor);
+  const visibleSupertrendValues = supertrendSettings.enabled
+    ? supertrend.values.slice(firstDataIndex, Math.min(view.end, allCandles.length)).filter(Number.isFinite)
+    : [];
+  const zoneVisibility = drawState.zones || { supply: true, demand: true };
+  const recentZoneHistory = previousTradingSessions(allCandles, 3);
+  const zoneReferencePrice = recentZoneHistory.candles.length
+    ? recentZoneHistory.candles[recentZoneHistory.candles.length - 1][4]
+    : allCandles[allCandles.length - 1][4];
+  const chartZones = kind === 'spot-intraday' && allCandles.length
+    ? detectSupplyDemandZones(
+      recentZoneHistory.candles,
+      zoneReferencePrice,
+      recentZoneHistory.startIndex,
+    )
+      .filter((zone) => zoneVisibility[zone.type])
+    : [];
 
-  const dataLow = Math.min(...candles.map((row) => row[3]));
-  const dataHigh = Math.max(...candles.map((row) => row[2]));
+  const dataLow = Math.min(...candles.map((row) => row[3]), ...visibleSupertrendValues, ...chartZones.map((zone) => zone.low));
+  const dataHigh = Math.max(...candles.map((row) => row[2]), ...visibleSupertrendValues, ...chartZones.map((zone) => zone.high));
   const dataMid = (dataLow + dataHigh) / 2 + (view.priceOffset || 0);
   const span = Math.max(dataHigh - dataLow, Math.abs(dataHigh) * 0.0001, 0.01) * (view.priceScale || 1);
   view.priceSpan = span;
@@ -670,9 +1050,16 @@ function drawCandles(kind, payload, symbol, interval) {
   const gap = (right - left) / view.window;
   const width = Math.max(1.4, Math.min(8, gap * 0.58));
   const gridGroup = makeSvgElement('g', { class: 'price-grid' });
+  const supplyDemandGroup = makeSvgElement('g', {
+    class: 'supply-demand-layer',
+    'clip-path': `url(#trend-clip-${kind})`,
+    'aria-label': 'Spot supply and demand zones',
+  });
   const candleGroup = makeSvgElement('g', { class: 'candle-layer' });
   const emaGroup = makeSvgElement('g', { class: 'ema-layer' });
   emaGroup.style.display = drawState.emaVisible ? '' : 'none';
+  const supertrendGroup = makeSvgElement('g', { class: 'supertrend-layer', 'clip-path': `url(#trend-clip-${kind})` });
+  const supertrendProfitGroup = makeSvgElement('g', { class: 'supertrend-profit-markers', 'aria-label': 'Supertrend profit target markers' });
   const retouchGroup = makeSvgElement('g', { class: 'ema-retouch-markers', 'aria-label': 'Spot EMA retouch markers' });
   const crossGroup = makeSvgElement('g', { class: 'ema-cross-layer', 'aria-label': '100 and 200 EMA crossovers' });
   const trendGroup = makeSvgElement('g', { class: 'trendline-layer', 'clip-path': `url(#trend-clip-${kind})` });
@@ -720,6 +1107,37 @@ function drawCandles(kind, payload, symbol, interval) {
   currentLabel.textContent = formatAxisPrice(currentPrice);
   axisGroup.append(currentLabel);
 
+  if (kind === 'spot-intraday' && candles.length) {
+    for (const zone of chartZones) {
+      const rawZoneTop = y(zone.high);
+      const rawZoneBottom = y(zone.low);
+      if (rawZoneBottom <= top || rawZoneTop >= bottom) continue;
+      const zoneTop = Math.max(top, rawZoneTop);
+      const zoneBottom = Math.min(bottom, rawZoneBottom);
+      if (zoneBottom - zoneTop < 1) continue;
+      const zoneStartX = Math.max(left, left + (zone.startIndex - startIndex) * gap);
+      if (zoneStartX >= right) continue;
+      const strengthClass = zone.touches > 1 ? 'multi-reversal-zone' : 'single-reversal-zone';
+      const className = `supply-demand-zone ${zone.type === 'supply' ? 'supply-zone' : 'demand-zone'} ${strengthClass}`;
+      const zoneRect = makeSvgElement('rect', {
+        x: zoneStartX.toFixed(2), y: zoneTop.toFixed(2),
+        width: (right - zoneStartX).toFixed(2), height: (zoneBottom - zoneTop).toFixed(2),
+        rx: 1, class: className,
+      });
+      const zoneTitle = makeSvgElement('title', {});
+      zoneTitle.textContent = `${zone.type === 'supply' ? 'Supply' : 'Demand'} zone · ${formatAxisPrice(zone.low)}–${formatAxisPrice(zone.high)} · ${zone.touches} confirmed ${zone.touches === 1 ? 'reversal' : 'reversals'}`;
+      zoneRect.append(zoneTitle);
+      supplyDemandGroup.append(zoneRect);
+      const label = makeSvgElement('text', {
+        x: (zoneStartX + 4).toFixed(2),
+        y: Math.max(zoneTop + 9, Math.min(zoneBottom - 2, (zoneTop + zoneBottom) / 2 + 3)).toFixed(2),
+        class: `supply-demand-label ${zone.type === 'supply' ? 'supply-label' : 'demand-label'}`,
+      });
+      label.textContent = `${zone.type === 'supply' ? 'SUPPLY' : 'DEMAND'} · ${zone.touches}×`;
+      supplyDemandGroup.append(label);
+    }
+  }
+
   for (const [index, row] of candles.entries()) {
     const [, open, high, low, close] = row;
     const slot = firstDataIndex - startIndex + index;
@@ -728,11 +1146,13 @@ function drawCandles(kind, payload, symbol, interval) {
     const className = up ? 'candle-up' : 'candle-down';
     const wick = makeSvgElement('line', {
       x1: x.toFixed(2), y1: y(high).toFixed(2), x2: x.toFixed(2), y2: y(low).toFixed(2), class: `candle-wick ${className}`,
+      'data-candle-time': row[0], 'data-candle-close': close,
     });
     const bodyTop = Math.min(y(open), y(close));
     const bodyHeight = Math.max(1.2, Math.abs(y(open) - y(close)));
     const body = makeSvgElement('rect', {
       x: (x - width / 2).toFixed(2), y: bodyTop.toFixed(2), width: width.toFixed(2), height: bodyHeight.toFixed(2), rx: 0.7, class: className,
+      'data-candle-time': row[0], 'data-candle-close': close,
     });
     candleGroup.append(wick, body);
   }
@@ -781,6 +1201,70 @@ function drawCandles(kind, payload, symbol, interval) {
       legendNode.querySelector('.ema-swatch').style.backgroundColor = ema.color;
       legendNode.style.display = ema.enabled ? '' : 'none';
     }
+  }
+
+  if (supertrendSettings.enabled) {
+    for (const isUptrend of [true, false]) {
+      let pathData = '';
+      let drawingSegment = false;
+      for (let candleIndex = firstDataIndex; candleIndex < Math.min(view.end, allCandles.length); candleIndex += 1) {
+        const value = supertrend.values[candleIndex];
+        if (!Number.isFinite(value) || supertrend.uptrend[candleIndex] !== isUptrend) {
+          drawingSegment = false;
+          continue;
+        }
+        const slot = candleIndex - startIndex;
+        const x = left + (slot + 0.5) * gap;
+        pathData += `${drawingSegment ? 'L' : 'M'}${x.toFixed(2)},${y(value).toFixed(2)} `;
+        drawingSegment = true;
+      }
+      if (pathData) {
+        supertrendGroup.append(makeSvgElement('path', {
+          d: pathData.trim(),
+          class: `supertrend-line ${isUptrend ? 'supertrend-up' : 'supertrend-down'}`,
+        }));
+      }
+    }
+    let trendStartNumber = 0;
+    const visibleEnd = Math.min(view.end, allCandles.length);
+    const trendStarts = supertrendStartEvents(allCandles, supertrend);
+    for (const event of trendStarts) {
+      const candleIndex = event.index;
+      if (candleIndex < firstDataIndex || candleIndex >= visibleEnd) continue;
+      const candle = allCandles[candleIndex];
+      const isUptrend = event.direction === 'up';
+      const slot = candleIndex - startIndex;
+      const x = left + (slot + 0.5) * gap;
+      const price = Number(candle[4]);
+      const pointY = y(price);
+      const colorClass = isUptrend ? 'supertrend-up' : 'supertrend-down';
+      const marker = makeSvgElement('g', {
+        class: `supertrend-start-marker ${colorClass}`,
+        'aria-label': `${isUptrend ? 'Uptrend' : 'Downtrend'} Supertrend started at ${formatXAxisLabel(candle[0], interval)} · close ₹${formatNumber(price)}`,
+      });
+      const title = makeSvgElement('title', {});
+      title.textContent = `${isUptrend ? 'Uptrend' : 'Downtrend'} Supertrend started · ${formatXAxisLabel(candle[0], interval)} · Close ₹${formatNumber(price)}`;
+      marker.append(title);
+      marker.append(makeSvgElement('circle', { cx: x.toFixed(2), cy: pointY.toFixed(2), r: 2.2, class: 'supertrend-start-dot' }));
+      const alignRight = x > right - 82;
+      const labelY = pointY < top + 14 || trendStartNumber % 2 ? pointY + 11 : pointY - 6;
+      const label = makeSvgElement('text', {
+        x: (x + (alignRight ? -5 : 5)).toFixed(2),
+        y: labelY.toFixed(2),
+        class: 'supertrend-start-label',
+        'text-anchor': alignRight ? 'end' : 'start',
+      });
+      label.textContent = `${formatEmaRetouchTime(candle[0], interval)} ₹${formatNumber(price)}`;
+      marker.append(label);
+      supertrendGroup.append(marker);
+      trendStartNumber += 1;
+    }
+  }
+  const latestSupertrendDirection = Number.isFinite(supertrend.values[supertrend.values.length - 1])
+    ? (supertrend.uptrend[supertrend.uptrend.length - 1] ? 'up' : 'down')
+    : null;
+  if (kind === 'spot-intraday') {
+    observeSpotSupertrendTransitions(allCandles, symbol, interval, supertrendSettings, supertrend);
   }
 
   if (drawState.emaVisible && kind === 'spot-intraday') {
@@ -933,6 +1417,43 @@ function drawCandles(kind, payload, symbol, interval) {
       marker.append(label);
       retouchGroup.append(marker);
     }
+
+    const visibleEnd = Math.min(view.end, allCandles.length);
+    const profitEvent = supertrendSettings.enabled
+      ? supertrendProfitEvents(allCandles, supertrend).find((event) => (
+        event.index >= firstDataIndex && event.index < visibleEnd
+      ))
+      : null;
+    if (profitEvent) {
+      const event = profitEvent;
+      const candleIndex = event.index;
+      const candle = allCandles[candleIndex];
+      if (candle && candle[0] === event.timestamp) {
+        const visibleSlot = candleIndex - startIndex;
+        const targetY = y(event.targetPrice);
+        if (visibleSlot >= 0 && visibleSlot < view.window && targetY >= top && targetY <= bottom) {
+          const x = left + (visibleSlot + 0.5) * gap;
+          const marker = makeSvgElement('g', {
+            class: 'supertrend-profit-marker',
+            'aria-label': `Supertrend ${event.direction} profit target reached · entry ₹${formatNumber(event.entryPrice)} · target ₹${formatNumber(event.targetPrice)} · ${formatXAxisLabel(event.timestamp, interval)}`,
+          });
+          const title = makeSvgElement('title', {});
+          title.textContent = `Supertrend ${event.direction} profit target reached · entry ₹${formatNumber(event.entryPrice)} · target ₹${formatNumber(event.targetPrice)} · ${formatXAxisLabel(event.timestamp, interval)}`;
+          marker.append(title);
+          const smile = makeSvgElement('image', {
+            x: (x - 8).toFixed(2),
+            y: (targetY - 18).toFixed(2),
+            width: 16,
+            height: 16,
+            href: '/supertrend-smiley.png',
+            preserveAspectRatio: 'xMidYMid meet',
+            class: 'supertrend-profit-smile',
+          });
+          marker.append(smile);
+          supertrendProfitGroup.append(marker);
+        }
+      }
+    }
   }
 
   const fastEmaIndex = drawState.emas.findIndex((ema) => Number(ema.period) === 100);
@@ -1028,7 +1549,7 @@ function drawCandles(kind, payload, symbol, interval) {
     if (pathData) freehandGroup.append(makeSvgElement('path', { d: pathData.trim(), class: 'freehand-mark' }));
   }
 
-  document.querySelector(`#chart-${kind} g`).replaceChildren(definitions, gridGroup, candleGroup, emaGroup, retouchGroup, crossGroup, trendGroup, freehandGroup, currentPriceGroup, axisGroup);
+  document.querySelector(`#chart-${kind} g`).replaceChildren(definitions, gridGroup, supplyDemandGroup, candleGroup, emaGroup, supertrendGroup, retouchGroup, crossGroup, supertrendProfitGroup, trendGroup, freehandGroup, currentPriceGroup, axisGroup);
   if (drawState.emaVisible) {
     const neededTimeframes = new Set(drawState.emas
       .filter((ema) => ema.enabled)
@@ -1041,6 +1562,7 @@ function drawCandles(kind, payload, symbol, interval) {
   document.querySelector(`#empty-${kind}`).hidden = true;
   document.querySelector(`[data-chart-latest="${kind}"]`).hidden = false;
   renderTimeAxis(kind, allCandles, interval, startIndex, view.window);
+  updateSupertrendLegend(kind, latestSupertrendDirection);
   const latest = candles[candles.length - 1];
   const isDaily = interval === '1D' || interval === '1W' || interval === '1M';
   const stamp = new Date(latest[0] * 1000);
@@ -1207,6 +1729,12 @@ function readSavedWorkspaces() {
   }
 }
 
+function defaultWorkspace(workspaces = readSavedWorkspaces()) {
+  const lastWorkspaceId = localStorage.getItem(lastWorkspaceStorageKey);
+  return workspaces.find((workspace) => workspace.id === lastWorkspaceId)
+    || (workspaces.length === 1 ? workspaces[0] : null);
+}
+
 function renderSavedWorkspaces(selectedId = document.querySelector('#workspace-select').value) {
   const select = document.querySelector('#workspace-select');
   const workspaces = readSavedWorkspaces().sort((a, b) => a.name.localeCompare(b.name));
@@ -1237,6 +1765,8 @@ function captureWorkspace(name, id) {
       } : null,
       emaVisible: chartDrawState[kind].emaVisible,
       emas: chartDrawState[kind].emas.map((ema) => ({ ...ema })),
+      supertrend: { ...chartDrawState[kind].supertrend },
+      zones: { ...(chartDrawState[kind].zones || { supply: true, demand: true }) },
       extendTrendlineRight: chartDrawState[kind].extendTrendlineRight,
       trendlines: chartDrawState[kind].trendlines.map((line) => ({ ...line })),
     };
@@ -1269,6 +1799,7 @@ function saveWorkspace() {
     : [...workspaces, workspace];
   try {
     localStorage.setItem(workspacesStorageKey, JSON.stringify(next));
+    localStorage.setItem(lastWorkspaceStorageKey, id);
     renderSavedWorkspaces(id);
     showNotice(existing ? `Workspace “${name}” updated.` : `Workspace “${name}” saved.`);
   } catch {
@@ -1300,6 +1831,9 @@ async function loadWorkspace(workspace) {
   const loadButton = document.querySelector('#load-workspace');
   loadButton.disabled = true;
   try {
+    localStorage.setItem(lastWorkspaceStorageKey, workspace.id);
+    document.querySelector('#workspace-select').value = workspace.id;
+    document.querySelector('#workspace-name').value = workspace.name;
     const savedUnderlying = UNDERLYINGS[workspace.underlying] ? workspace.underlying : 'NIFTY';
     currentUnderlying = savedUnderlying;
     localStorage.setItem(underlyingStorageKey, currentUnderlying);
@@ -1364,6 +1898,20 @@ async function loadWorkspace(workspace) {
           };
         })
         : defaultEmaSettings.map((ema) => ({ ...ema }));
+      const savedSupertrend = savedChart.supertrend || {};
+      chartDrawState[kind].supertrend = {
+        enabled: savedSupertrend.enabled !== false,
+        atrLength: Number.isInteger(Number(savedSupertrend.atrLength))
+          && Number(savedSupertrend.atrLength) >= 1 && Number(savedSupertrend.atrLength) <= 200
+          ? Number(savedSupertrend.atrLength) : defaultSupertrendSettings.atrLength,
+        factor: Number.isFinite(Number(savedSupertrend.factor))
+          && Number(savedSupertrend.factor) >= 0.1 && Number(savedSupertrend.factor) <= 20
+          ? Number(savedSupertrend.factor) : defaultSupertrendSettings.factor,
+      };
+      chartDrawState[kind].zones = {
+        supply: savedChart.zones?.supply !== false,
+        demand: savedChart.zones?.demand !== false,
+      };
       chartDrawState[kind].trendlines = Array.isArray(savedChart.trendlines)
         ? savedChart.trendlines.map((line) => ({ ...line }))
         : [];
@@ -1394,6 +1942,10 @@ function deleteSelectedWorkspace() {
   const workspaces = readSavedWorkspaces().filter((item) => item.id !== id);
   try {
     localStorage.setItem(workspacesStorageKey, JSON.stringify(workspaces));
+    if (localStorage.getItem(lastWorkspaceStorageKey) === id) {
+      if (workspaces.length === 1) localStorage.setItem(lastWorkspaceStorageKey, workspaces[0].id);
+      else localStorage.removeItem(lastWorkspaceStorageKey);
+    }
     renderSavedWorkspaces();
     showNotice(`Workspace “${workspace.name}” deleted.`);
   } catch {
@@ -1412,7 +1964,12 @@ async function refreshConnectionStatus() {
       connectButton.disabled = true;
       disconnectButton.disabled = false;
       setNotice('', false);
-      await loadMarketData();
+      const workspace = defaultWorkspace();
+      if (workspace) {
+        renderSavedWorkspaces(workspace.id);
+        document.querySelector('#workspace-name').value = workspace.name;
+        await loadWorkspace(workspace);
+      } else await loadMarketData();
     } else if (status.configured) {
       setConnection('FYERS login needed', false, true);
       connectButton.textContent = 'Connect';
@@ -2309,6 +2866,28 @@ function updateIndicatorLegend(kind) {
     swatch.style.boxShadow = index === 2 && ema.color.toLowerCase() === '#000000'
       && document.documentElement.dataset.theme !== 'light' ? '0 0 0 1px #d7e1ed' : '';
   }
+  updateSupertrendLegend(kind);
+}
+
+function updateSupertrendLegend(kind, direction = null) {
+  const card = document.querySelector(`[data-chart-card="${kind}"]`);
+  const legend = card.querySelector('.indicator-legend');
+  let item = legend.querySelector('.supertrend-legend-item');
+  if (!item) {
+    item = document.createElement('span');
+    item.className = 'supertrend-legend-item';
+    const swatch = document.createElement('i');
+    swatch.className = 'supertrend-legend-swatch';
+    const label = document.createElement('span');
+    label.className = 'supertrend-legend-name';
+    item.append(swatch, label);
+    const controls = legend.querySelector('.chart-markup-tools');
+    legend.insertBefore(item, controls || null);
+  }
+  const settings = chartDrawState[kind].supertrend || defaultSupertrendSettings;
+  item.hidden = !settings.enabled;
+  item.querySelector('.supertrend-legend-name').textContent = `Supertrend ${settings.atrLength}, ${settings.factor}${direction ? ` · ${direction === 'up' ? 'Uptrend' : 'Downtrend'}` : ''}`;
+  item.querySelector('.supertrend-legend-swatch').style.backgroundColor = direction === 'down' ? '#ef4444' : '#22c55e';
 }
 
 function createIndicatorDialog(kind) {
@@ -2384,6 +2963,73 @@ function createIndicatorDialog(kind) {
   }
   panel.append(rows);
 
+  if (kind === 'spot-intraday') {
+    const zoneSection = document.createElement('section');
+    zoneSection.className = 'zone-settings';
+    const zoneHeading = document.createElement('h3');
+    zoneHeading.textContent = 'Supply and demand zones';
+    const zoneFields = document.createElement('div');
+    zoneFields.className = 'zone-settings-fields';
+    for (const [zoneType, labelText] of [['supply', 'Show Supply Zones'], ['demand', 'Show Demand Zones']]) {
+      const label = document.createElement('label');
+      label.className = 'zone-enabled-field';
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.dataset.zoneEnabled = zoneType;
+      checkbox.setAttribute('aria-label', labelText);
+      const text = document.createElement('span');
+      text.textContent = labelText;
+      label.append(checkbox, text);
+      zoneFields.append(label);
+    }
+    const zoneNote = document.createElement('p');
+    zoneNote.className = 'zone-settings-note';
+    zoneNote.textContent = 'Uses the previous 3 completed sessions. Darker bands mark repeated reversals.';
+    zoneSection.append(zoneHeading, zoneFields);
+    zoneSection.append(zoneNote);
+    panel.append(zoneSection);
+  }
+
+  const supertrendSection = document.createElement('section');
+  supertrendSection.className = 'supertrend-settings';
+  const supertrendHeading = document.createElement('h3');
+  supertrendHeading.textContent = 'Supertrend';
+  const supertrendFields = document.createElement('div');
+  supertrendFields.className = 'supertrend-settings-fields';
+  const supertrendEnabledLabel = document.createElement('label');
+  supertrendEnabledLabel.className = 'supertrend-enabled-field';
+  const supertrendEnabled = document.createElement('input');
+  supertrendEnabled.type = 'checkbox';
+  supertrendEnabled.dataset.supertrendEnabled = '';
+  const supertrendEnabledText = document.createElement('span');
+  supertrendEnabledText.textContent = 'Show Supertrend';
+  supertrendEnabledLabel.append(supertrendEnabled, supertrendEnabledText);
+  const atrLengthLabel = document.createElement('label');
+  atrLengthLabel.className = 'setting-field';
+  atrLengthLabel.textContent = 'ATR Length';
+  const atrLength = document.createElement('input');
+  atrLength.type = 'number';
+  atrLength.min = '1';
+  atrLength.max = '200';
+  atrLength.step = '1';
+  atrLength.dataset.supertrendAtrLength = '';
+  atrLength.setAttribute('aria-label', 'Supertrend ATR length');
+  atrLengthLabel.append(atrLength);
+  const factorLabel = document.createElement('label');
+  factorLabel.className = 'setting-field';
+  factorLabel.textContent = 'Factor';
+  const factor = document.createElement('input');
+  factor.type = 'number';
+  factor.min = '0.1';
+  factor.max = '20';
+  factor.step = '0.1';
+  factor.dataset.supertrendFactor = '';
+  factor.setAttribute('aria-label', 'Supertrend factor');
+  factorLabel.append(factor);
+  supertrendFields.append(supertrendEnabledLabel, atrLengthLabel, factorLabel);
+  supertrendSection.append(supertrendHeading, supertrendFields);
+  panel.append(supertrendSection);
+
   const actions = document.createElement('div');
   actions.className = 'indicator-dialog-actions';
   const cancel = document.createElement('button');
@@ -2413,8 +3059,35 @@ function createIndicatorDialog(kind) {
         timeframe: panel.querySelector(`[data-ema-timeframe="${index}"]`).value,
       });
     }
+    const nextAtrLength = Number(panel.querySelector('[data-supertrend-atr-length]').value);
+    const nextSupertrendFactor = Number(panel.querySelector('[data-supertrend-factor]').value);
+    if (!Number.isInteger(nextAtrLength) || nextAtrLength < 1 || nextAtrLength > 200) {
+      const input = panel.querySelector('[data-supertrend-atr-length]');
+      input.setCustomValidity('Enter a whole number from 1 to 200.');
+      input.reportValidity();
+      input.setCustomValidity('');
+      return;
+    }
+    if (!Number.isFinite(nextSupertrendFactor) || nextSupertrendFactor < 0.1 || nextSupertrendFactor > 20) {
+      const input = panel.querySelector('[data-supertrend-factor]');
+      input.setCustomValidity('Enter a factor from 0.1 to 20.');
+      input.reportValidity();
+      input.setCustomValidity('');
+      return;
+    }
     chartDrawState[kind].emaVisible = show.checked;
     chartDrawState[kind].emas = nextSettings;
+    chartDrawState[kind].supertrend = {
+      enabled: supertrendEnabled.checked,
+      atrLength: nextAtrLength,
+      factor: nextSupertrendFactor,
+    };
+    if (kind === 'spot-intraday') {
+      chartDrawState[kind].zones = {
+        supply: panel.querySelector('[data-zone-enabled="supply"]').checked,
+        demand: panel.querySelector('[data-zone-enabled="demand"]').checked,
+      };
+    }
     updateIndicatorLegend(kind);
     redrawChart(kind);
     dialog.close();
@@ -2444,6 +3117,15 @@ function openIndicatorSettings(kind, button) {
     dialog.querySelector(`[data-ema-color="${index}"]`).value = ema.color;
     dialog.querySelector(`[data-ema-timeframe="${index}"]`).value = ema.timeframe || 'chart';
   }
+  const supertrend = state.supertrend || defaultSupertrendSettings;
+  if (kind === 'spot-intraday') {
+    const zones = state.zones || { supply: true, demand: true };
+    dialog.querySelector('[data-zone-enabled="supply"]').checked = zones.supply !== false;
+    dialog.querySelector('[data-zone-enabled="demand"]').checked = zones.demand !== false;
+  }
+  dialog.querySelector('[data-supertrend-enabled]').checked = supertrend.enabled !== false;
+  dialog.querySelector('[data-supertrend-atr-length]').value = String(supertrend.atrLength ?? defaultSupertrendSettings.atrLength);
+  dialog.querySelector('[data-supertrend-factor]').value = String(supertrend.factor ?? defaultSupertrendSettings.factor);
   button.setAttribute('aria-expanded', 'true');
   dialog.showModal();
 }
@@ -2769,7 +3451,9 @@ document.querySelector('#load-workspace').addEventListener('click', () => {
   if (workspace) loadWorkspace(workspace);
 });
 document.querySelector('#delete-workspace').addEventListener('click', deleteSelectedWorkspace);
-renderSavedWorkspaces('');
+const startupWorkspace = defaultWorkspace();
+renderSavedWorkspaces(startupWorkspace?.id || '');
+if (startupWorkspace) document.querySelector('#workspace-name').value = startupWorkspace.name;
 
 document.querySelector('#expiry-select').addEventListener('change', async (event) => {
   selectedExpiry = event.target.value;
